@@ -1,0 +1,15 @@
+# .gitignore
+
+# Security (NEVER PUSH THIS)
+.env
+
+# Python junk
+__pycache__/
+*.pyc
+venv/
+env/
+
+# Node.js junk (for the frontend team)
+node_modules/
+dist/
+.DS_Store
