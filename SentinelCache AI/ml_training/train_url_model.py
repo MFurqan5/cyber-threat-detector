@@ -83,43 +83,41 @@ for name, model in models.items():
 
 # ── Hyperparameter Tuning for ALL Models ──
 print("\n" + "=" * 60)
-print("HYPERPARAMETER TUNING (GridSearchCV - All Models)")
+print("HYPERPARAMETER TUNING (RandomizedSearchCV - All Models)")
 print("=" * 60)
+
+from sklearn.model_selection import RandomizedSearchCV
 
 tuning_configs = {
     'Decision Tree': {
         'model': DecisionTreeClassifier(random_state=42),
         'params': {
-            'max_depth': [3, 5, 10, 15, 20, None],
-            'min_samples_split': [2, 5, 10],
-            'min_samples_leaf': [1, 2, 4],
-            'criterion': ['gini', 'entropy'],
+            'max_depth': [5, 10, 20],
+            'min_samples_split': [2, 5],
+            'min_samples_leaf': [1, 2],
         }
     },
     'Random Forest': {
         'model': RandomForestClassifier(random_state=42, n_jobs=-1),
         'params': {
-            'n_estimators': [100, 200, 300],
-            'max_depth': [5, 10, 20, None],
-            'min_samples_split': [2, 5, 10],
-            'min_samples_leaf': [1, 2],
+            'n_estimators': [50, 100],
+            'max_depth': [10, 20, None],
+            'min_samples_split': [2, 5],
         }
     },
     'SVM': {
-        'model': SVC(random_state=42),
+        'model': SVC(random_state=42, max_iter=2000), # Cap iterations for performance on large data
         'params': {
-            'C': [0.01, 0.1, 1, 10, 50, 100],
-            'gamma': ['scale', 'auto', 0.001, 0.01, 0.1, 1],
-            'kernel': ['rbf', 'linear', 'poly', 'sigmoid'],
+            'C': [0.1, 1, 10],
+            'kernel': ['rbf', 'linear'],
         }
     },
     'XGBoost': {
         'model': GradientBoostingClassifier(random_state=42),
         'params': {
-            'n_estimators': [100, 200, 300],
-            'learning_rate': [0.01, 0.05, 0.1, 0.2],
-            'max_depth': [3, 5, 7, 10],
-            'subsample': [0.8, 1.0],
+            'n_estimators': [50, 100],
+            'learning_rate': [0.05, 0.1],
+            'max_depth': [3, 5],
         }
     },
 }
@@ -131,13 +129,15 @@ for name, config in tuning_configs.items():
     print(f"Tuning: {name}")
     print(f"{'-' * 40}")
 
-    grid = GridSearchCV(
+    grid = RandomizedSearchCV(
         config['model'],
         config['params'],
-        cv=5,
+        n_iter=3, # Limit search combinations for 96k dataset
+        cv=3,     # Reduced CV folds to speed up execution
         scoring='f1',
         n_jobs=-1,
-        verbose=0
+        verbose=1,
+        random_state=42
     )
     grid.fit(X_train, y_train)
 

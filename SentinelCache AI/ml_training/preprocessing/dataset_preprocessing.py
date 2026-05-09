@@ -193,119 +193,60 @@ pd.Series(tfidf.get_feature_names_out()).to_csv(
 print("Saved: email_tfidf_features.npz, email_labels.npy, email_tfidf_feature_names.csv")
 print("Email preprocessing COMPLETE!\n")
 
-# PART 2: WEBSITE PHISHING DATASET PREPROCESSING
-url_df = pd.read_csv(os.path.join(DATASET_DIR, 'Website Phishing.csv'))
+# PART 2: URLSET DATASET PREPROCESSING
+url_df = pd.read_csv(os.path.join(DATASET_DIR, 'urlset.csv'), encoding='latin-1', on_bad_lines='skip', low_memory=False)
 
 print(f"\nShape: {url_df.shape}")
 print(f"Columns: {url_df.columns.tolist()}")
 print(f"\nFirst 5 rows:\n{url_df.head()}")
-print(f"\nData types:\n{url_df.dtypes}")
-print(f"\nBasic stats:\n{url_df.describe()}")
 
-# Missing Values Check
-print("\n--- Missing Values ---")
-print(url_df.isnull().sum())
-print(f"\nTotal missing: {url_df.isnull().sum().sum()}")
+# Data Cleaning
+print("\n--- Data Cleaning ---")
+# Drop rows where label is missing
+if 'label' in url_df.columns:
+    initial_len = len(url_df)
+    url_df = url_df.dropna(subset=['label'])
+    print(f"Dropped {initial_len - len(url_df)} rows with missing labels.")
+    
+    # Drop domain column since it's text and we want numerical features
+    if 'domain' in url_df.columns:
+        url_df = url_df.drop(columns=['domain'])
+        print("Dropped 'domain' column.")
+    
+    # Ensure label is int
+    url_df['label'] = url_df['label'].astype(int)
 
-# Duplicate Check & Removal
-print("\n--- Duplicates ---")
-dup_count = url_df.duplicated().sum()
-print(f"Duplicate rows found: {dup_count}")
-
-if dup_count > 0:
-    url_df = url_df.drop_duplicates().reset_index(drop=True)
-    print(f"After removing duplicates: {url_df.shape}")
-
-# Unique Values per Feature
-print("\n--- Unique Values per Feature ---")
+# Coerce all other columns to numeric
 for col in url_df.columns:
-    print(f"  {col}: {sorted(url_df[col].unique())}")
+    if col != 'label':
+        url_df[col] = pd.to_numeric(url_df[col], errors='coerce')
 
-# Class Distribution (Target = 'Result')
-print("\n--- Target Class Distribution ---")
-target_counts = url_df['Result'].value_counts().sort_index()
-print(target_counts)
-print(f"\nClasses: -1 = Phishing, 0 = Suspicious, 1 = Legitimate")
-
-# Visualization
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-colors = ['#e74c3c', '#f39c12', '#2ecc71']
-labels = ['Phishing (-1)', 'Suspicious (0)', 'Legitimate (1)']
-
-target_counts.plot(kind='bar', ax=axes[0], color=colors, edgecolor='black')
-axes[0].set_title('Website Phishing - Class Distribution', fontsize=14, fontweight='bold')
-axes[0].set_xlabel('Result')
-axes[0].set_ylabel('Count')
-axes[0].set_xticklabels(labels, rotation=15)
-for i, v in enumerate(target_counts.values):
-    axes[0].text(i, v + 5, str(v), ha='center', fontweight='bold')
-
-axes[1].pie(target_counts.values, labels=labels, autopct='%1.1f%%',
-            colors=colors, startangle=90, explode=(0.05, 0.05, 0))
-axes[1].set_title('Website Phishing - Class Proportion', fontsize=14, fontweight='bold')
-
-plt.tight_layout()
-# plt.savefig(os.path.join(OUTPUT_DIR, 'url_class_distribution.png'), dpi=150)
-plt.close()
+# Impute remaining missing values with median
+missing_before = url_df.isnull().sum().sum()
+url_df = url_df.fillna(url_df.median())
+missing_after = url_df.isnull().sum().sum()
+print(f"Imputed {missing_before - missing_after} missing values with median.")
 
 # Convert to Binary Classification
 print("\n--- Converting to Binary Classification ---")
-print("Mapping: -1 (Phishing) & 0 (Suspicious) -> 0 (Malicious)")
-print("         1 (Legitimate) -> 1 (Safe)")
+print("Mapping in urlset.csv: 1 (Phishing) -> 0 (Malicious)")
+print("                       0 (Legitimate) -> 1 (Safe)")
 
-url_df['Result_binary'] = url_df['Result'].apply(lambda x: 1 if x == 1 else 0)
+url_df['Result_binary'] = url_df['label'].apply(lambda x: 0 if x == 1 else 1)
+# Drop the original label
+url_df = url_df.drop(columns=['label'])
 
 binary_counts = url_df['Result_binary'].value_counts()
 print(f"\nBinary class distribution:")
-print(f"  0 (Malicious): {binary_counts[0]}")
-print(f"  1 (Safe):      {binary_counts[1]}")
-
-# Correlation Heatmap
-print("\n--- Correlation Analysis ---")
-
-feature_cols = [c for c in url_df.columns if c not in ['Result', 'Result_binary']]
-corr_matrix = url_df[feature_cols + ['Result_binary']].corr()
-
-plt.figure(figsize=(12, 9))
-mask = np.triu(np.ones_like(corr_matrix, dtype=bool))
-sns.heatmap(corr_matrix, annot=True, fmt='.2f', cmap='coolwarm', center=0,
-            mask=mask, square=True, linewidths=0.5,
-            cbar_kws={'label': 'Correlation Coefficient'})
-plt.title('Feature Correlation Heatmap (Website Phishing)', fontsize=14, fontweight='bold')
-plt.tight_layout()
-# plt.savefig(os.path.join(OUTPUT_DIR, 'url_correlation_heatmap.png'), dpi=150)
-plt.close()
-
-# Correlations with target
-print("\nCorrelation with target (Result_binary):")
-target_corr = corr_matrix['Result_binary'].drop('Result_binary').sort_values(ascending=False)
-print(target_corr)
-print("\nObservation: Features most correlated with legitimacy can be identified above.")
-
-# Feature Distribution per Class
-print("\n--- Feature Distribution per Class ---")
-
-fig, axes = plt.subplots(3, 3, figsize=(16, 12))
-axes = axes.flatten()
-
-for i, col in enumerate(feature_cols):
-    for label, color, name in [(0, '#e74c3c', 'Malicious'), (1, '#2ecc71', 'Safe')]:
-        subset = url_df[url_df['Result_binary'] == label][col]
-        axes[i].hist(subset, alpha=0.6, color=color, label=name, edgecolor='black', bins=5)
-    axes[i].set_title(col, fontsize=11, fontweight='bold')
-    axes[i].legend(fontsize=8)
-
-plt.suptitle('Feature Distributions by Class', fontsize=15, fontweight='bold', y=1.01)
-plt.tight_layout()
-# plt.savefig(os.path.join(OUTPUT_DIR, 'url_feature_distributions.png'), dpi=150)
-plt.close()
+print(f"  0 (Malicious): {binary_counts.get(0, 0)}")
+print(f"  1 (Safe):      {binary_counts.get(1, 0)}")
 
 # Feature Scaling (StandardScaler)
 print("\n--- Feature Scaling ---")
 
 from sklearn.preprocessing import StandardScaler
 
+feature_cols = [c for c in url_df.columns if c != 'Result_binary']
 X_url = url_df[feature_cols].values
 y_url = url_df['Result_binary'].values
 
@@ -314,11 +255,10 @@ X_url_scaled = scaler.fit_transform(X_url)
 
 print(f"Features shape: {X_url_scaled.shape}")
 print(f"Target shape:   {y_url.shape}")
-print(f"\nScaled feature means (should be ~0): {X_url_scaled.mean(axis=0).round(4)}")
-print(f"Scaled feature stds  (should be ~1): {X_url_scaled.std(axis=0).round(4)}")
+print(f"\nScaled feature means (should be ~0): {X_url_scaled.mean(axis=0).round(4)[:5]}...")
 
-# Save Preprocessed Website Phishing Data
-print("\n--- Saving Preprocessed Website Phishing Data ---")
+# Save Preprocessed URL Data
+print("\n--- Saving Preprocessed URL Data ---")
 
 # Save scaled features and labels
 np.save(os.path.join(OUTPUT_DIR, 'url_features_scaled.npy'), X_url_scaled)
@@ -327,13 +267,9 @@ np.save(os.path.join(OUTPUT_DIR, 'url_labels.npy'), y_url)
 pd.Series(feature_cols).to_csv(
     os.path.join(OUTPUT_DIR, 'url_feature_names.csv'), index=False
 )
-# Save full cleaned dataframe
-# url_df[feature_cols + ['Result_binary']].to_csv(
-#     os.path.join(OUTPUT_DIR, 'website_phishing_cleaned.csv'), index=False
-# )
 
 print("Saved: url_features_scaled.npy, url_labels.npy, url_feature_names.csv")
-print("Website phishing preprocessing COMPLETE!\n")
+print("URL dataset preprocessing COMPLETE!\n")
 
 # Final Summary
 print("=" * 60)
@@ -341,21 +277,13 @@ print("PREPROCESSING SUMMARY")
 print("=" * 60)
 print(f"""
 EMAIL DATASET:
-  - Original:     5728 rows × 2 cols
-  - After dedup:  {len(email_df)} rows
-  - Cleaning:     Lowercase, remove URLs/emails/HTML/numbers/special chars
-  - NLP:          Stopword removal + Lemmatization
   - Vectorized:   TF-IDF (max_features=5000, ngrams=1-2)
   - Output shape: {X_email_tfidf.shape}
-  - Saved files:  email_tfidf_features.npz, email_labels.npy, email_tfidf_feature_names.csv
 
-WEBSITE PHISHING DATASET:
-  - Original:     1353 rows × 10 cols
-  - After dedup:  {len(url_df)} rows
-  - Target:       Converted 3-class -> binary (Malicious=0, Safe=1)
-  - Scaling:      StandardScaler applied
+URL DATASET (urlset.csv):
+  - Original:     ~96000 rows × 14 cols
   - Output shape: {X_url_scaled.shape}
-  - Saved files:  url_features_scaled.npy, url_labels.npy, url_feature_names.csv
+  - Target:       Binary (Malicious=0, Safe=1)
 
 All preprocessed data saved to: {OUTPUT_DIR}
 """)
