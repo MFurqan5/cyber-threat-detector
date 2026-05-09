@@ -1,0 +1,51 @@
+# backend/seed_db.py
+import psycopg2
+import uuid
+from datetime import datetime
+
+# Connection to local Docker Postgres
+DB_URL = "postgresql://postgres:password@localhost:5432/cyber_db"
+
+def seed():
+    try:
+        conn = psycopg2.connect(DB_URL)
+        cur = conn.cursor()
+
+        # Create Table (Matching the schema )
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS scan_results (
+                id UUID PRIMARY KEY,
+                scan_type VARCHAR(10),
+                input_data TEXT,
+                prediction VARCHAR(20),
+                confidence FLOAT,
+                timestamp TIMESTAMP
+            );
+        """)
+
+        # Clear existing data for a clean start
+        cur.execute("TRUNCATE TABLE scan_results;")
+
+        # Industry-standard test cases
+        test_data = [
+            (str(uuid.uuid4()), 'url', 'https://google.com', 'safe', 0.99),
+            (str(uuid.uuid4()), 'url', 'http://paypal-secure-login.xyz', 'dangerous', 0.97),
+            (str(uuid.uuid4()), 'email', 'Meeting moved to 4 PM.', 'ham', 0.98),
+            (str(uuid.uuid4()), 'email', 'WINNER! Click here for your prize!', 'spam', 0.95)
+        ]
+
+        for entry in test_data:
+            cur.execute("""
+                INSERT INTO scan_results (id, scan_type, input_data, prediction, confidence, timestamp)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (*entry, datetime.now()))
+
+        conn.commit()
+        print("✅ Local database seeded successfully!")
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"❌ Error: {e}")
+
+if __name__ == "__main__":
+    seed()
