@@ -1,1 +1,2 @@
+In this folder, the `.csv` files downloaded from Kaggle will be placed.
 delete it, when you start working
