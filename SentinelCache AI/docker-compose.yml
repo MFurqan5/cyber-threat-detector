@@ -1,51 +1,76 @@
-# backend/seed_db.py
-import psycopg2
-import uuid
-from datetime import datetime
+version: "3.9"
 
-# Connection to local Docker Postgres
-DB_URL = "postgresql://postgres:password@localhost:5432/cyber_db"
+# ============================================================
+# AI Cybersecurity Threat Detector - Docker Compose
+# Run:  docker-compose up -d
+# Stop: docker-compose down
+# Wipe: docker-compose down -v   (deletes all data)
+# ============================================================
 
-def seed():
-    try:
-        conn = psycopg2.connect(DB_URL)
-        cur = conn.cursor()
+services:
 
-        # Create Table (Matching the schema )
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS scan_results (
-                id UUID PRIMARY KEY,
-                scan_type VARCHAR(10),
-                input_data TEXT,
-                prediction VARCHAR(20),
-                confidence FLOAT,
-                timestamp TIMESTAMP
-            );
-        """)
+  # ----------------------------------------------------------
+  # PostgreSQL - Main permanent database
+  # Port 5432 on your laptop
+  # ----------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    container_name: cyber_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cyberuser
+      POSTGRES_PASSWORD: cyberpass123
+      POSTGRES_DB: Cache_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cyberuser -d Cache_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-        # Clear existing data for a clean start
-        cur.execute("TRUNCATE TABLE scan_results;")
+  # ----------------------------------------------------------
+  # Redis - L2 Cache (fast RAM cache)
+  # Port 6379 on your laptop
+  # ----------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: cyber_redis
+    restart: unless-stopped
+    command: redis-server --save "" --appendonly no --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-        # Industry-standard test cases
-        test_data = [
-            (str(uuid.uuid4()), 'url', 'https://google.com', 'safe', 0.99),
-            (str(uuid.uuid4()), 'url', 'http://paypal-secure-login.xyz', 'dangerous', 0.97),
-            (str(uuid.uuid4()), 'email', 'Meeting moved to 4 PM.', 'ham', 0.98),
-            (str(uuid.uuid4()), 'email', 'WINNER! Click here for your prize!', 'spam', 0.95)
-        ]
+  # ----------------------------------------------------------
+  # MongoDB - L3 Cache (persistent cache with TTL auto-delete)
+  # Port 27017 on your laptop
+  # ----------------------------------------------------------
+  mongodb:
+    image: mongo:6-jammy
+    container_name: cyber_mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: cyberuser
+      MONGO_INITDB_ROOT_PASSWORD: cyberpass123
+      MONGO_INITDB_DATABASE: Cache_db
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-        for entry in test_data:
-            cur.execute("""
-                INSERT INTO scan_results (id, scan_type, input_data, prediction, confidence, timestamp)
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (*entry, datetime.now()))
-
-        conn.commit()
-        print("✅ Local database seeded successfully!")
-        cur.close()
-        conn.close()
-    except Exception as e:
-        print(f"❌ Error: {e}")
-
-if __name__ == "__main__":
-    seed()
+volumes:
+  postgres_data:
+  mongo_data:
