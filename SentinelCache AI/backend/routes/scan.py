@@ -42,45 +42,9 @@ class ScanResponse(BaseModel):
     timestamp: str
 
 def extract_url_features(url: str) -> np.ndarray:
-    """Extract 10 URL features for Random Forest"""
-    features = []
-    
-    # 1. URL length (normalized)
-    features.append(min(len(url) / 2000, 1.0))
-    
-    # 2. Number of dots
-    features.append(min(url.count('.') / 20, 1.0))
-    
-    # 3. Has @ symbol
-    features.append(1.0 if '@' in url else 0.0)
-    
-    # 4. Has HTTPS
-    features.append(1.0 if 'https' in url.lower() else 0.0)
-    
-    # 5. Number of slashes
-    features.append(min(url.count('/') / 10, 1.0))
-    
-    # 6. Has IP address
-    ip_pattern = r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'
-    features.append(1.0 if re.search(ip_pattern, url) else 0.0)
-    
-    # 7. Number of hyphens
-    features.append(min(url.count('-') / 10, 1.0))
-    
-    # 8. Suspicious keywords
-    suspicious = ['login', 'verify', 'account', 'secure', 'update', 'confirm', 'signin', 'banking', 'paypal', 'amazon']
-    features.append(sum(1 for kw in suspicious if kw in url.lower()) / len(suspicious))
-    
-    # 9. Domain length
-    domain_match = re.search(r'https?://([^/]+)', url)
-    domain_len = len(domain_match.group(1)) if domain_match else 0
-    features.append(min(domain_len / 100, 1.0))
-    
-    # 10. Special characters count
-    special_chars = sum(1 for c in url if c in '?=&%+')
-    features.append(min(special_chars / 20, 1.0))
-    
-    return np.array(features).reshape(1, -1)
+    """Extract 25 URL features using shared feature module"""
+    from backend.url_features import extract_url_features_single
+    return extract_url_features_single(url)
 
 def load_model(model_name: str):
     """Load model from pickle file"""
@@ -249,18 +213,8 @@ async def scan_url(request: URLScanRequest, background_tasks: BackgroundTasks):
     
     # Extract features
     features_array = extract_url_features(url_str)
-    features_dict = {
-        'url_length': float(features_array[0][0]),
-        'dot_count': float(features_array[0][1]),
-        'has_at_symbol': float(features_array[0][2]),
-        'has_https': float(features_array[0][3]),
-        'slash_count': float(features_array[0][4]),
-        'has_ip': float(features_array[0][5]),
-        'hyphen_count': float(features_array[0][6]),
-        'suspicious_keywords': float(features_array[0][7]),
-        'domain_length': float(features_array[0][8]),
-        'special_chars': float(features_array[0][9])
-    }
+    from backend.url_features import FEATURE_NAMES
+    features_dict = {name: float(features_array[0][i]) for i, name in enumerate(FEATURE_NAMES)}
     
     # Load model and predict
     model = load_model("url_model")

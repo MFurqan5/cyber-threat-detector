@@ -1,4 +1,5 @@
 import os
+import sys
 import numpy as np
 import pandas as pd
 import joblib
@@ -13,26 +14,39 @@ from sklearn.metrics import (
 import warnings
 warnings.filterwarnings('ignore')
 
+# Import shared 25-feature extractor (single source of truth)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from url_features import extract_url_features_batch, FEATURE_NAMES
+
 # ── Paths ──
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, 'preprocessing', 'preprocessed_data')
 MODEL_DIR = os.path.join(BASE_DIR, 'models')
 os.makedirs(MODEL_DIR, exist_ok=True)
 
-# ── Load Preprocessed Data ──
+# ── Load API-Compatible Data (from urlset.csv) ──
 print("=" * 60)
-print("URL PHISHING MODEL TRAINING")
+print("URL PHISHING MODEL TRAINING (API COMPATIBLE)")
 print("=" * 60)
 
-X = np.load(os.path.join(DATA_DIR, 'url_features_scaled.npy'))
-y = np.load(os.path.join(DATA_DIR, 'url_labels.npy'))
+csv_path = os.path.join(BASE_DIR, 'datasets', 'urlset.csv')
+print(f"Loading raw dataset from: {csv_path}")
+df = pd.read_csv(csv_path, encoding='latin-1', on_bad_lines='skip', low_memory=False)
 
-feature_names = pd.read_csv(os.path.join(DATA_DIR, 'url_feature_names.csv')).iloc[:, 0].tolist()
+print("Preprocessing for API conformity...")
+df = df.dropna(subset=['label'])
+df['label'] = pd.to_numeric(df['label'], errors='coerce').fillna(0).astype(int)
+# Binary map aligned with API: 1 = Malicious, 0 = Safe
+df['Result_binary'] = df['label'].apply(lambda x: 1 if x == 1 else 0)
 
-print(f"Features shape: {X.shape}")
+# Extract 25 features using the shared module (identical to API)
+X = extract_url_features_batch(df['domain'])
+y = df['Result_binary'].values
+
+print(f"\nFeatures shape: {X.shape}  ({len(FEATURE_NAMES)} features)")
 print(f"Labels shape:   {y.shape}")
-print(f"Features: {feature_names}")
-print(f"Class distribution: Malicious={sum(y==0)}, Safe={sum(y==1)}")
+print(f"Features aligned with backend: {FEATURE_NAMES}")
+print(f"Class distribution: Safe={sum(y==0)}, Malicious={sum(y==1)}")
 
 # ── Train/Test Split (80/20) ──
 X_train, X_test, y_train, y_test = train_test_split(
@@ -92,32 +106,30 @@ tuning_configs = {
     'Decision Tree': {
         'model': DecisionTreeClassifier(random_state=42),
         'params': {
-            'max_depth': [5, 10, 20],
-            'min_samples_split': [2, 5],
-            'min_samples_leaf': [1, 2],
+            'max_depth': [5, 10, 20, 30, 50, None],
+            'min_samples_split': [2, 3, 5, 10],
+            'min_samples_leaf': [1, 2, 4],
+            'criterion': ['gini', 'entropy'],
         }
     },
     'Random Forest': {
         'model': RandomForestClassifier(random_state=42, n_jobs=-1),
         'params': {
-            'n_estimators': [50, 100],
-            'max_depth': [10, 20, None],
-            'min_samples_split': [2, 5],
-        }
-    },
-    'SVM': {
-        'model': SVC(random_state=42, max_iter=2000),
-        'params': {
-            'C': [0.1, 1, 10],
-            'kernel': ['rbf', 'linear'],
+            'n_estimators': [100, 200, 300, 500],
+            'max_depth': [10, 20, 30, 50, None],
+            'min_samples_split': [2, 3, 5],
+            'min_samples_leaf': [1, 2],
+            'max_features': ['sqrt', 'log2', None],
         }
     },
     'XGBoost': {
         'model': GradientBoostingClassifier(random_state=42),
         'params': {
-            'n_estimators': [50, 100],
-            'learning_rate': [0.05, 0.1],
-            'max_depth': [3, 5],
+            'n_estimators': [100, 200, 300, 500],
+            'learning_rate': [0.01, 0.05, 0.1, 0.2],
+            'max_depth': [3, 5, 7, 10],
+            'min_samples_split': [2, 5, 10],
+            'subsample': [0.8, 0.9, 1.0],
         }
     },
 }
@@ -182,62 +194,15 @@ print(results_df.to_string(index=False))
 best = max(all_results, key=lambda x: x['F1 Score'])
 print(f"\nBest Model: {best['Model']} (F1 Score: {best['F1 Score']:.4f})")
 
-# ── Save Best Model as .pkl ──
+# ── Save Best Model and Export to Backend ──
 pkl_path = os.path.join(MODEL_DIR, 'url_model.pkl')
 joblib.dump(best['model_obj'], pkl_path)
-print(f"Model saved to: {pkl_path}")
+print(f"Model saved to ML output: {pkl_path}")
+
+backend_path = os.path.join(os.path.dirname(BASE_DIR), 'backend', 'models', 'url_model.pkl')
+os.makedirs(os.path.dirname(backend_path), exist_ok=True)
+joblib.dump(best['model_obj'], backend_path)
+print(f"API-Compatible model deployed to: {backend_path}")
 
 print("\nURL model training COMPLETE!")
 
-# ============================================================
-# ALTERNATIVE IMPLEMENTATION FROM HASEEB BRANCH
-# ============================================================
-
-def train_url_model_alternative():
-    """
-    Alternative URL phishing detection model implementation
-    Uses Random Forest with placeholder data until dataset is available
-    """
-    print("\n" + "=" * 50)
-    print("📊 ALTERNATIVE URL MODEL (Haseeb's Implementation)")
-    print("=" * 50)
-    
-    try:
-        import pickle as alt_pickle
-        
-        print("Waiting for phishing.csv dataset...")
-        print("Once dataset is available, implement:")
-        print("1. Load phishing.csv")
-        print("2. Extract URL features")
-        print("3. Train Random Forest classifier")
-        print("4. Evaluate model")
-        print("5. Save as backend/models/url_model_alternative.pkl")
-        
-        # Create test model for now
-        dummy_model = RandomForestClassifier(n_estimators=10, random_state=42)
-        X_dummy = np.random.rand(100, 10)
-        y_dummy = np.random.randint(0, 2, 100)
-        dummy_model.fit(X_dummy, y_dummy)
-        
-        # Save alternative model
-        alt_model_path = os.path.join(MODEL_DIR, 'url_model_alternative.pkl')
-        with open(alt_model_path, 'wb') as f:
-            alt_pickle.dump(dummy_model, f)
-        
-        print(f"✅ Alternative model saved to: {alt_model_path}")
-        
-        # Example metrics (placeholder)
-        print("\n📈 Model Performance (placeholder):")
-        print(f"Accuracy: 0.94")
-        print(f"Precision: 0.93")
-        print(f"Recall: 0.92")
-        print(f"F1 Score: 0.92")
-        
-    except Exception as e:
-        print(f"Alternative training skipped: {e}")
-
-# Run both implementations
-if __name__ == "__main__":
-    # Original training runs automatically
-    # Alternative is available as a function
-    pass

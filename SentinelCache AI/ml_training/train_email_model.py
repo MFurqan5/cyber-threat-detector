@@ -92,70 +92,42 @@ print(results_df.to_string(index=False))
 best = max(results, key=lambda x: x['F1 Score'])
 print(f"\nBest Model: {best['Model']} (F1 Score: {best['F1 Score']:.4f})")
 
-# ── Save Best Model as .pkl ──
-pkl_path = os.path.join(MODEL_DIR, 'email_model.pkl')
-joblib.dump(best['model_obj'], pkl_path)
-print(f"Model saved to: {pkl_path}")
+# ── Wrap and Save Best Model for API ──
+print("\nWrapping best model in a Pipeline for API compatibility...")
+from sklearn.pipeline import Pipeline
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+# Load cleaned text dataset to fit the vectorizer for the pipeline
+try:
+    print("Re-fitting vectorizer for unified pipeline...")
+    df_cleaned = pd.read_csv(os.path.join(DATA_DIR, 'emails_cleaned.csv'))
+    # Recreate original config from dataset_preprocessing.py
+    vectorizer = TfidfVectorizer(max_features=5000, ngram_range=(1, 2))
+    vectorizer.fit(df_cleaned['processed_text'].fillna(''))
+    
+    # Build final pipeline
+    final_pipeline = Pipeline([
+        ('tfidf', vectorizer),
+        ('classifier', best['model_obj'])
+    ])
+    
+    # Save to training dir
+    pkl_path = os.path.join(MODEL_DIR, 'email_model.pkl')
+    joblib.dump(final_pipeline, pkl_path)
+    print(f"Pipeline saved to: {pkl_path}")
+    
+    # Also push to backend dir directly
+    backend_dir = os.path.join(os.path.dirname(BASE_DIR), 'backend', 'models')
+    os.makedirs(backend_dir, exist_ok=True)
+    backend_path = os.path.join(backend_dir, 'email_model.pkl')
+    joblib.dump(final_pipeline, backend_path)
+    print(f"✅ API-Compatible model deployed to: {backend_path}")
+    
+except Exception as e:
+    print(f"⚠️ Warning: Could not build combined pipeline: {e}")
+    # Fallback to original save
+    pkl_path = os.path.join(MODEL_DIR, 'email_model.pkl')
+    joblib.dump(best['model_obj'], pkl_path)
+    print(f"Saved classifier only to: {pkl_path}")
 
 print("\nEmail model training COMPLETE!")
-
-# ============================================================
-# ALTERNATIVE IMPLEMENTATION FROM HASEEB BRANCH
-# ============================================================
-
-def train_email_model_alternative():
-    """
-    Alternative Email phishing detection model implementation
-    Uses Naive Bayes with TF-IDF pipeline
-    """
-    print("\n" + "=" * 50)
-    print("📧 ALTERNATIVE EMAIL MODEL (Haseeb's Implementation)")
-    print("=" * 50)
-    
-    try:
-        import pickle
-        from sklearn.naive_bayes import MultinomialNB
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        from sklearn.pipeline import Pipeline
-        
-        print("Waiting for spam.csv dataset...")
-        print("Once dataset is available, implement:")
-        print("1. Load spam.csv")
-        print("2. Preprocess email text")
-        print("3. Create TF-IDF + Naive Bayes pipeline")
-        print("4. Train and evaluate model")
-        print("5. Save as backend/models/email_model_alternative.pkl")
-        
-        # Create test pipeline for now
-        pipeline = Pipeline([
-            ('tfidf', TfidfVectorizer(max_features=1000)),
-            ('nb', MultinomialNB())
-        ])
-        
-        # Train with dummy data
-        dummy_texts = ['sample email text', 'test message', 'phishing attempt', 'normal email']
-        dummy_labels = [0, 0, 1, 0]
-        pipeline.fit(dummy_texts, dummy_labels)
-        
-        # Save alternative model
-        alt_model_path = os.path.join(MODEL_DIR, 'email_model_alternative.pkl')
-        with open(alt_model_path, 'wb') as f:
-            pickle.dump(pipeline, f)
-        
-        print(f"✅ Alternative model saved to: {alt_model_path}")
-        
-        # Example metrics (placeholder)
-        print("\n📈 Model Performance (placeholder):")
-        print(f"Accuracy: 0.96")
-        print(f"Precision: 0.95")
-        print(f"Recall: 0.94")
-        print(f"F1 Score: 0.94")
-        
-    except Exception as e:
-        print(f"Alternative training skipped: {e}")
-
-# Run both implementations if needed
-if __name__ == "__main__":
-    # Original training runs automatically
-    # Alternative is available as a function
-    pass
