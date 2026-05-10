@@ -106,7 +106,7 @@ tuning_configs = {
         }
     },
     'SVM': {
-        'model': SVC(random_state=42, max_iter=2000), # Cap iterations for performance on large data
+        'model': SVC(random_state=42, max_iter=2000),
         'params': {
             'C': [0.1, 1, 10],
             'kernel': ['rbf', 'linear'],
@@ -132,8 +132,8 @@ for name, config in tuning_configs.items():
     grid = RandomizedSearchCV(
         config['model'],
         config['params'],
-        n_iter=3, # Limit search combinations for 96k dataset
-        cv=3,     # Reduced CV folds to speed up execution
+        n_iter=3,
+        cv=3,
         scoring='f1',
         n_jobs=-1,
         verbose=1,
@@ -189,3 +189,55 @@ print(f"Model saved to: {pkl_path}")
 
 print("\nURL model training COMPLETE!")
 
+# ============================================================
+# ALTERNATIVE IMPLEMENTATION FROM HASEEB BRANCH
+# ============================================================
+
+def train_url_model_alternative():
+    """
+    Alternative URL phishing detection model implementation
+    Uses Random Forest with placeholder data until dataset is available
+    """
+    print("\n" + "=" * 50)
+    print("📊 ALTERNATIVE URL MODEL (Haseeb's Implementation)")
+    print("=" * 50)
+    
+    try:
+        import pickle as alt_pickle
+        
+        print("Waiting for phishing.csv dataset...")
+        print("Once dataset is available, implement:")
+        print("1. Load phishing.csv")
+        print("2. Extract URL features")
+        print("3. Train Random Forest classifier")
+        print("4. Evaluate model")
+        print("5. Save as backend/models/url_model_alternative.pkl")
+        
+        # Create test model for now
+        dummy_model = RandomForestClassifier(n_estimators=10, random_state=42)
+        X_dummy = np.random.rand(100, 10)
+        y_dummy = np.random.randint(0, 2, 100)
+        dummy_model.fit(X_dummy, y_dummy)
+        
+        # Save alternative model
+        alt_model_path = os.path.join(MODEL_DIR, 'url_model_alternative.pkl')
+        with open(alt_model_path, 'wb') as f:
+            alt_pickle.dump(dummy_model, f)
+        
+        print(f"✅ Alternative model saved to: {alt_model_path}")
+        
+        # Example metrics (placeholder)
+        print("\n📈 Model Performance (placeholder):")
+        print(f"Accuracy: 0.94")
+        print(f"Precision: 0.93")
+        print(f"Recall: 0.92")
+        print(f"F1 Score: 0.92")
+        
+    except Exception as e:
+        print(f"Alternative training skipped: {e}")
+
+# Run both implementations
+if __name__ == "__main__":
+    # Original training runs automatically
+    # Alternative is available as a function
+    pass
