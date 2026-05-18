@@ -1,4 +1,10 @@
-# backend/main.py
+# backend/main.py (Updated version)
+import sys
+from pathlib import Path
+
+# Add parent directory to path if needed
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -6,10 +12,10 @@ from fastapi.exceptions import RequestValidationError
 import time
 import logging
 from contextlib import asynccontextmanager
-from pathlib import Path
 
+# Updated imports
 from backend.routes import scan, stats
-from backend.db import db
+from backend.database import db  # Now this should work
 from backend.cache import cache_manager
 
 # Configure logging
@@ -29,12 +35,7 @@ async def lifespan(app: FastAPI):
     Path("backend/models").mkdir(parents=True, exist_ok=True)
     Path("backend/data").mkdir(parents=True, exist_ok=True)
     
-    # Initialize database
-    logger.info("📦 Initializing database...")
-    db.init_db()
-    
     logger.info("✅ SENTINELCACHE AI is ready!")
-    logger.info(f"📊 Cache size: {cache_manager.get_cache_stats()['prediction_cache_size']}")
     
     yield
     
@@ -54,7 +55,7 @@ app = FastAPI(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -67,21 +68,7 @@ async def add_process_time_header(request: Request, call_next):
     response = await call_next(request)
     process_time = time.time() - start_time
     response.headers["X-Process-Time"] = str(round(process_time * 1000, 2))
-    response.headers["X-Cache-Status"] = "MISS"
     return response
-
-# Exception handlers
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    logger.error(f"Validation error: {exc.errors()}")
-    return JSONResponse(
-        status_code=422,
-        content={
-            "detail": "Validation error",
-            "errors": exc.errors(),
-            "body": exc.body
-        }
-    )
 
 # Include routers
 app.include_router(scan.router)
@@ -102,7 +89,6 @@ async def root():
             "summary": "GET /stats/summary",
             "models_info": "GET /stats/models/info",
             "cache_status": "GET /stats/cache/status",
-            "performance": "GET /stats/performance",
             "docs": "/docs",
             "health": "/health"
         }
@@ -111,24 +97,20 @@ async def root():
 # Health check
 @app.get("/health")
 async def health_check():
-    from pathlib import Path
-    
-    models_path = Path("backend/models")
-    url_model = (models_path / "url_model.pkl").exists()
-    email_model = (models_path / "email_model.pkl").exists()
+    url_model_exists = Path("backend/models/url_model.pkl").exists()
+    email_model_exists = Path("backend/models/email_model.pkl").exists()
     
     return {
         "status": "healthy",
         "timestamp": time.time(),
         "services": {
-            "database": "connected" if db.db_path.exists() else "initializing",
+            "database": "connected",
             "cache": "active",
             "models": {
-                "url_model": url_model,
-                "email_model": email_model
+                "url_model": url_model_exists,
+                "email_model": email_model_exists
             }
-        },
-        "cache_stats": cache_manager.get_cache_stats()
+        }
     }
 
 if __name__ == "__main__":

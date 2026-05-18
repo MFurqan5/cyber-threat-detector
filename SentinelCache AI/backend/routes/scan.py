@@ -290,7 +290,31 @@ async def scan_url(request: URLScanRequest, background_tasks: BackgroundTasks):
         request_id=request_id,
         timestamp=datetime.now().isoformat()
     )
-
+    # Save to database (PostgreSQL, Redis) in background
+    try:
+        if ml_db and hasattr(ml_db, 'save_prediction'):
+            background_tasks.add_task(
+                ml_db.save_prediction,
+                request_id, user_id, "url", url_str, prediction_data,
+                "rf-url-v2.1-test", prediction_time, severity, action
+            )
+            logger.info(f"📝 Save task added for {request_id}")
+        else:
+            logger.error("❌ ml_db.save_prediction not available!")
+    except Exception as e:
+        logger.error(f"❌ Failed to schedule save: {e}")# Save to database (PostgreSQL, Redis) in background
+    try:
+        if ml_db and hasattr(ml_db, 'save_prediction'):
+            background_tasks.add_task(
+                ml_db.save_prediction,
+                request_id, user_id, "url", url_str, prediction_data,
+                "rf-url-v2.1-test", prediction_time, severity, action
+            )
+            logger.info(f"📝 Save task added for {request_id}")
+        else:
+            logger.error("❌ ml_db.save_prediction not available!")
+    except Exception as e:
+        logger.error(f"❌ Failed to schedule save: {e}")
 @router.post("/email", response_model=ScanResponse)
 async def scan_email(request: EmailScanRequest, background_tasks: BackgroundTasks):
     """Scan email content - integrates with existing database"""
