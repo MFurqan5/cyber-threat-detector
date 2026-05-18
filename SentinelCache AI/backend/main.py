@@ -98,6 +98,8 @@ async def root():
         "endpoints": {
             "scan_url": "POST /scan/url",
             "scan_email": "POST /scan/email",
+            "scan_app_name": "POST /scan/app-name",
+            "scan_app_apk": "POST /scan/app",
             "history": "GET /stats/history",
             "summary": "GET /stats/summary",
             "models_info": "GET /stats/models/info",
@@ -116,6 +118,7 @@ async def health_check():
     models_path = Path("backend/models")
     url_model = (models_path / "url_model.pkl").exists()
     email_model = (models_path / "email_model.pkl").exists()
+    app_model = (models_path / "app_model.pkl").exists()
     
     return {
         "status": "healthy",
@@ -125,7 +128,8 @@ async def health_check():
             "cache": "active",
             "models": {
                 "url_model": url_model,
-                "email_model": email_model
+                "email_model": email_model,
+                "app_model": app_model
             }
         },
         "cache_stats": cache_manager.get_cache_stats()
