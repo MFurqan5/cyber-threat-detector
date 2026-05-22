@@ -1,4 +1,10 @@
-# backend/main.py
+# backend/main.py (Updated version)
+import sys
+from pathlib import Path
+
+# Add parent directory to path if needed
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -6,9 +12,8 @@ from fastapi.exceptions import RequestValidationError
 import time
 import logging
 from contextlib import asynccontextmanager
-from pathlib import Path
 
-from backend.routes import scan, stats
+from backend.routes import scan, stats, auth
 from backend.db import db
 from backend.cache import cache_manager
 
@@ -29,12 +34,7 @@ async def lifespan(app: FastAPI):
     Path("backend/models").mkdir(parents=True, exist_ok=True)
     Path("backend/data").mkdir(parents=True, exist_ok=True)
     
-    # Initialize database
-    logger.info("📦 Initializing database...")
-    db.init_db()
-    
     logger.info("✅ SENTINELCACHE AI is ready!")
-    logger.info(f"📊 Cache size: {cache_manager.get_cache_stats()['prediction_cache_size']}")
     
     yield
     
@@ -54,7 +54,7 @@ app = FastAPI(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -67,7 +67,6 @@ async def add_process_time_header(request: Request, call_next):
     response = await call_next(request)
     process_time = time.time() - start_time
     response.headers["X-Process-Time"] = str(round(process_time * 1000, 2))
-    response.headers["X-Cache-Status"] = "MISS"
     return response
 
 # Exception handlers
@@ -83,9 +82,23 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         }
     )
 
+@app.exception_handler(Exception)
+async def debug_exception_handler(request: Request, exc: Exception):
+    import traceback
+    tb = traceback.format_exc()
+    logger.error(f"DEBUG EXCEPTION HANDLER: {tb}")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": str(exc),
+            "traceback": tb
+        }
+    )
+
 # Include routers
 app.include_router(scan.router)
 app.include_router(stats.router)
+app.include_router(auth.router)
 
 # Root endpoint
 @app.get("/")
@@ -104,7 +117,6 @@ async def root():
             "summary": "GET /stats/summary",
             "models_info": "GET /stats/models/info",
             "cache_status": "GET /stats/cache/status",
-            "performance": "GET /stats/performance",
             "docs": "/docs",
             "health": "/health"
         }
@@ -124,15 +136,14 @@ async def health_check():
         "status": "healthy",
         "timestamp": time.time(),
         "services": {
-            "database": "connected" if db.db_path.exists() else "initializing",
+            "database": "connected",
             "cache": "active",
             "models": {
                 "url_model": url_model,
                 "email_model": email_model,
                 "app_model": app_model
             }
-        },
-        "cache_stats": cache_manager.get_cache_stats()
+        }
     }
 
 if __name__ == "__main__":

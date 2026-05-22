@@ -1,33 +1,49 @@
-# backend/db.py
-"""SQLite database for persistent storage"""
+# backend/db.py - Updated to handle both SQLite and Docker databases
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 import json
 from typing import List, Dict, Optional
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path("backend/data/sentinelcache.db")
+# SQLite path for local storage
+SQLITE_PATH = Path("backend/data/sentinelcache.db")
 
 class Database:
-    """Database manager for scan history and analytics"""
+    """Unified Database Manager - Handles SQLite + PostgreSQL/Redis/MongoDB"""
     
     def __init__(self):
-        self.db_path = DB_PATH
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.init_db()
+        # Initialize SQLite (always available)
+        self.sqlite_path = SQLITE_PATH
+        self.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+        self.init_sqlite()
+        
+        # Try to initialize Docker databases (PostgreSQL, Redis, MongoDB)
+        self.docker_available = False
+        self.ml_integration = None
+        
+        try:
+            from backend.db.ml_integration import MLDatabaseIntegration
+            self.ml_integration = MLDatabaseIntegration()
+            self.docker_available = True
+            logger.info("Docker databases (PostgreSQL/Redis/MongoDB) connected")
+        except Exception as e:
+            logger.warning(f"Docker databases not available: {e}. Using SQLite only.")
     
-    def get_connection(self):
-        """Get database connection"""
-        conn = sqlite3.connect(self.db_path)
+    # ============ SQLite Methods (Local Storage) ============
+    
+    def get_sqlite_connection(self):
+        """Get SQLite database connection"""
+        conn = sqlite3.connect(self.sqlite_path)
         conn.row_factory = sqlite3.Row
         return conn
     
-    def init_db(self):
-        """Initialize database tables"""
-        with self.get_connection() as conn:
+    def init_sqlite(self):
+        """Initialize SQLite database tables"""
+        with self.get_sqlite_connection() as conn:
             cursor = conn.cursor()
             
             # Scans table
@@ -42,12 +58,14 @@ class Database:
                     prediction_time_ms REAL NOT NULL,
                     features_used TEXT,
                     session_id TEXT,
+                    threat_type TEXT,
+                    explanation TEXT,
                     timestamp TEXT NOT NULL,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
             """)
             
-            # Create index for faster queries
+            # Create indexes for faster queries
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_timestamp 
                 ON scans(timestamp DESC)
@@ -56,6 +74,11 @@ class Database:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_scan_type 
                 ON scans(scan_type)
+            """)
+            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_malicious 
+                ON scans(is_malicious)
             """)
             
             # Models table
@@ -69,38 +92,62 @@ class Database:
                     is_active INTEGER DEFAULT 1
                 )
             """)
+
+            # Users table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT UNIQUE NOT NULL,
+                    email TEXT UNIQUE NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # Create index for faster user lookups
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_users_username 
+                ON users(username)
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_users_email 
+                ON users(email)
+            """)
             
             conn.commit()
-            logger.info("Database initialized successfully")
+            logger.info("SQLite database initialized successfully at: %s", self.sqlite_path)
     
-    def save_scan(self, scan_data: dict):
-        """Save scan result to database"""
-        with self.get_connection() as conn:
+    def save_scan_sqlite(self, scan_data: dict):
+        """Save scan result to SQLite"""
+        with self.get_sqlite_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO scans (
                     scan_type, input_hash, input_preview, is_malicious,
                     confidence, prediction_time_ms, features_used, 
-                    session_id, timestamp
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    session_id, threat_type, explanation, timestamp
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                scan_data['scan_type'],
+                scan_data.get('scan_type'),
                 scan_data.get('input_hash', ''),
                 scan_data.get('input_preview', '')[:200],
-                1 if scan_data['is_malicious'] else 0,
-                scan_data['confidence'],
-                scan_data['prediction_time_ms'],
+                1 if scan_data.get('is_malicious') else 0,
+                scan_data.get('confidence', 0),
+                scan_data.get('prediction_time_ms', 0),
                 json.dumps(scan_data.get('features_used', [])),
                 scan_data.get('session_id'),
+                scan_data.get('threat_type', 'unknown'),
+                scan_data.get('explanation', ''),
                 scan_data.get('timestamp', datetime.now().isoformat())
             ))
             conn.commit()
             return cursor.lastrowid
     
-    def get_scans(self, limit: int = 100, offset: int = 0, 
-                  scan_type: Optional[str] = None, 
-                  malicious_only: bool = False) -> List[dict]:
-        """Get scans with filters"""
+    def get_scans_sqlite(self, limit: int = 100, offset: int = 0, 
+                         scan_type: Optional[str] = None, 
+                         malicious_only: bool = False) -> List[dict]:
+        """Get scans from SQLite with filters"""
         query = "SELECT * FROM scans WHERE 1=1"
         params = []
         
@@ -114,15 +161,15 @@ class Database:
         query += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
         
-        with self.get_connection() as conn:
+        with self.get_sqlite_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(query, params)
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
     
-    def get_stats(self, hours: int = 24) -> dict:
-        """Get aggregated statistics"""
-        with self.get_connection() as conn:
+    def get_stats_sqlite(self, hours: int = 24) -> dict:
+        """Get aggregated statistics from SQLite"""
+        with self.get_sqlite_connection() as conn:
             cursor = conn.cursor()
             
             # Total scans in timeframe
@@ -157,6 +204,7 @@ class Database:
                 }
             
             return {
+                "source": "sqlite",
                 "period_hours": hours,
                 "total_scans": stats.get('total', 0),
                 "by_type": by_type,
@@ -165,9 +213,36 @@ class Database:
                 "avg_prediction_time_ms": round(stats.get('avg_time') or 0, 2)
             }
     
-    def log_model_load(self, model_name: str, version: str = "1.0.0"):
-        """Log model loading event"""
+    def create_user(self, username: str, email: str, password_hash: str) -> int:
+        """Create a new user and return user id"""
         with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO users (username, email, password_hash)
+                VALUES (?, ?, ?)
+            """, (username, email, password_hash))
+            conn.commit()
+            return cursor.lastrowid
+
+    def get_user_by_username(self, username: str) -> Optional[dict]:
+        """Retrieve a user by username"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def get_user_by_email(self, email: str) -> Optional[dict]:
+        """Retrieve a user by email"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def log_model_load(self, model_name: str, version: str = "1.0.0"):
+        """Log model loading event to SQLite"""
+        with self.get_sqlite_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT OR REPLACE INTO models 
@@ -175,6 +250,7 @@ class Database:
                 VALUES (?, ?, ?, 1)
             """, (model_name, version, datetime.now().isoformat()))
             conn.commit()
+            logger.info(f"Model {model_name} v{version} logged in SQLite")
 
 # Global database instance
 db = Database()
