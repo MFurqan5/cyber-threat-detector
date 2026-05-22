@@ -187,7 +187,7 @@ class MLDatabaseIntegration:
                     status = 'complete',
                     created_at = EXCLUDED.created_at
                 RETURNING id
-            """, (request_id, user_id, input_type, input_value[:500], input_hash, datetime.now()))
+            """, (request_id, user_id, input_type, input_value[:500], input_hash, datetime.utcnow()))
             
             result = cur.fetchone()
             final_request_id = result[0] if result else request_id
@@ -209,14 +209,14 @@ class MLDatabaseIntegration:
                 json.dumps(prediction.get("indicators", [])),
                 model_version,
                 int(inference_ms),
-                datetime.now()
+                datetime.utcnow()
             ))
             
             # Insert into threat_logs
             cur.execute("""
                 INSERT INTO threat_logs (prediction_id, severity, action_taken, notes, created_at)
                 VALUES (%s, %s, %s, %s, %s)
-            """, (prediction_id, severity, action_taken, f"ML Prediction: {prediction.get('explanation', '')[:200]}", datetime.now()))
+            """, (prediction_id, severity, action_taken, f"ML Prediction: {prediction.get('explanation', '')[:200]}", datetime.utcnow()))
             
             conn.commit()
             cur.close()
