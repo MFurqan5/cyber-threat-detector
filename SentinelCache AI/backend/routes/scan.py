@@ -1,5 +1,4 @@
-# backend/routes/scan.py - UPDATED with graceful error handling for Redis/Docker
-from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
+from fastapi import APIRouter, HTTPException, BackgroundTasks, File, UploadFile, Form
 from pydantic import BaseModel, HttpUrl, Field
 from typing import List, Optional
 import re
@@ -8,20 +7,20 @@ from datetime import datetime
 import numpy as np
 from pathlib import Path
 import pickle
+import tempfile
+import os
 import uuid
 import logging
 
-# Import from ml_integration instead of direct db
 from backend.db.ml_integration import ml_db
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/scan", tags=["scan"])
 
-# Request/Response Models
 class URLScanRequest(BaseModel):
     url: HttpUrl
     user_id: Optional[str] = None
-    email: Optional[str] = None  # Alternative to user_id
+    email: Optional[str] = None
 
 class EmailScanRequest(BaseModel):
     email_content: str = Field(..., min_length=1, max_length=50000)
@@ -37,7 +36,7 @@ class ScanResponse(BaseModel):
     indicators: List[str]
     prediction_time_ms: float
     model_version: str
-    from_cache: str  # "redis", "mongodb", or "none"
+    from_cache: str  
     request_id: str
     timestamp: str
 
@@ -168,7 +167,6 @@ async def scan_url(request: URLScanRequest, background_tasks: BackgroundTasks):
     
     logger.info(f"Scanning URL: {url_str[:100]}...")
     
-    # Determine user_id
     user_id = request.user_id
     if not user_id and request.email:
         try:
@@ -178,9 +176,8 @@ async def scan_url(request: URLScanRequest, background_tasks: BackgroundTasks):
             user_id = None
     
     if not user_id:
-        user_id = "22222222-2222-2222-2222-222222222222"  # Default to existing user from seed
+        user_id = "22222222-2222-2222-2222-222222222222"
     
-    # Check cache first (Redis/MongoDB) with proper error handling
     cached = None
     cache_start = time.time()
     try:
@@ -213,16 +210,13 @@ async def scan_url(request: URLScanRequest, background_tasks: BackgroundTasks):
             logger.warning(f"Error processing cache result: {e}")
             cached = None
     
-    # Extract features
     features_array = extract_url_features(url_str)
     from backend.url_features import FEATURE_NAMES
     features_dict = {name: float(features_array[0][i]) for i, name in enumerate(FEATURE_NAMES)}
     
-    # Load model and predict
     model = load_model("url_model")
     
     if model is None:
-        # Fallback scoring for test mode
         score = float(np.mean(features_array[0]))
         prediction = 1 if score > 0.3 else 0
         logger.info(f"Using fallback prediction (model not loaded): score={score:.3f}, prediction={prediction}")
@@ -236,13 +230,11 @@ async def scan_url(request: URLScanRequest, background_tasks: BackgroundTasks):
             score = 0.3
             prediction = 0
     
-    # Generate explanation
     threat_type, explanation, indicators = get_phishing_explanation(features_dict, score)
     
     prediction_time = (time.time() - start_time) * 1000
     request_id = str(uuid.uuid4())
     
-    # Prepare prediction data for database
     prediction_data = {
         "label": "malicious" if prediction == 1 else "safe",
         "threat_type": threat_type,
@@ -251,7 +243,6 @@ async def scan_url(request: URLScanRequest, background_tasks: BackgroundTasks):
         "indicators": indicators
     }
     
-    # Determine severity and action based on score
     if score > 0.8:
         severity = "critical"
         action = "blocked"
@@ -265,7 +256,6 @@ async def scan_url(request: URLScanRequest, background_tasks: BackgroundTasks):
         severity = "low"
         action = "none"
     
-    # Save to database (PostgreSQL, Redis, MongoDB) in background with error handling
     try:
         if ml_db and hasattr(ml_db, 'save_prediction'):
             background_tasks.add_task(
@@ -328,7 +318,6 @@ async def scan_email(request: EmailScanRequest, background_tasks: BackgroundTask
     
     logger.info(f"Scanning email: '{email_preview[:50]}...'")
     
-    # Determine user_id
     user_id = request.user_id
     if not user_id and request.email:
         try:
@@ -340,7 +329,6 @@ async def scan_email(request: EmailScanRequest, background_tasks: BackgroundTask
     if not user_id:
         user_id = "22222222-2222-2222-2222-222222222222"
     
-    # Check cache with proper error handling
     cached = None
     cache_start = time.time()
     try:
@@ -373,39 +361,32 @@ async def scan_email(request: EmailScanRequest, background_tasks: BackgroundTask
             logger.warning(f"Error processing cache result: {e}")
             cached = None
     
-    # Load model
     model = load_model("email_model")
     
-    # Calculate suspicious score
     suspicious_keywords = ['verify', 'urgent', 'password', 'click', 'bank', 'account', 
                           'confirm', 'security', 'update', 'alert', 'suspended', 
                           'winner', 'prize', 'congratulations', 'immediately', 
                           'unauthorized', 'login', 'verify your account']
     
     score = sum(1 for kw in suspicious_keywords if kw in email_text.lower()) / len(suspicious_keywords)
-    prediction = 1 if score > 0.15 else 0  # Lower threshold for email
+    prediction = 1 if score > 0.15 else 0
     
-    # If model is available, use it for better prediction
     if model is not None:
         try:
-            # For test models, try to use them
             if hasattr(model, 'predict_proba'):
                 model_prediction = model.predict([email_text])[0]
                 model_score = float(max(model.predict_proba([email_text])[0]))
-                # Weighted average with rule-based scoring
                 score = (score + model_score) / 2
                 prediction = 1 if score > 0.2 else 0
                 logger.info(f"Model prediction: score={model_score:.3f}, final_score={score:.3f}")
         except Exception as e:
             logger.warning(f"Model prediction failed, using rule-based: {e}")
     
-    # Generate explanation
     threat_type, explanation, indicators = get_email_explanation(email_text, score)
     
     prediction_time = (time.time() - start_time) * 1000
     request_id = str(uuid.uuid4())
     
-    # Boost confidence for display
     display_confidence = min(score + 0.15, 0.99)
     
     prediction_data = {
@@ -416,7 +397,6 @@ async def scan_email(request: EmailScanRequest, background_tasks: BackgroundTask
         "indicators": indicators
     }
     
-    # Determine severity
     if score > 0.3:
         severity = "high"
         action = "flagged"
@@ -427,7 +407,6 @@ async def scan_email(request: EmailScanRequest, background_tasks: BackgroundTask
         severity = "low"
         action = "none"
     
-    # Save to database in background with error handling
     try:
         if ml_db and hasattr(ml_db, 'save_prediction'):
             background_tasks.add_task(
@@ -691,15 +670,14 @@ async def scan_health():
     """Health check for scan endpoints - with graceful error handling"""
     url_model_exists = Path("backend/models/url_model.pkl").exists()
     email_model_exists = Path("backend/models/email_model.pkl").exists()
+    app_model_exists = Path("backend/models/app_model.pkl").exists()
     
-    # Test database connections (with error handling)
     db_status = {
         "postgres": "not_configured",
         "redis": "not_configured",
         "mongodb": "not_configured"
     }
     
-    # Only try to connect if ml_db is available
     if ml_db:
         try:
             if hasattr(ml_db, 'get_postgres_connection'):
@@ -744,6 +722,11 @@ async def scan_health():
                 "loaded": email_model_exists, 
                 "test_mode": not email_model_exists,
                 "path": "backend/models/email_model.pkl" if email_model_exists else None
+            },
+            "app_model": {
+                "loaded": app_model_exists,
+                "test_mode": not app_model_exists,
+                "path": "backend/models/app_model.pkl" if app_model_exists else None
             }
         },
         "databases": db_status,

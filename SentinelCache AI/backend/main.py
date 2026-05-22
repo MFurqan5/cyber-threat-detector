@@ -13,9 +13,8 @@ import time
 import logging
 from contextlib import asynccontextmanager
 
-# Updated imports
-from backend.routes import scan, stats
-from backend.database import db  # Now this should work
+from backend.routes import scan, stats, auth
+from backend.db import db
 from backend.cache import cache_manager
 
 # Configure logging
@@ -70,9 +69,36 @@ async def add_process_time_header(request: Request, call_next):
     response.headers["X-Process-Time"] = str(round(process_time * 1000, 2))
     return response
 
+# Exception handlers
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logger.error(f"Validation error: {exc.errors()}")
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": "Validation error",
+            "errors": exc.errors(),
+            "body": exc.body
+        }
+    )
+
+@app.exception_handler(Exception)
+async def debug_exception_handler(request: Request, exc: Exception):
+    import traceback
+    tb = traceback.format_exc()
+    logger.error(f"DEBUG EXCEPTION HANDLER: {tb}")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": str(exc),
+            "traceback": tb
+        }
+    )
+
 # Include routers
 app.include_router(scan.router)
 app.include_router(stats.router)
+app.include_router(auth.router)
 
 # Root endpoint
 @app.get("/")
@@ -85,6 +111,8 @@ async def root():
         "endpoints": {
             "scan_url": "POST /scan/url",
             "scan_email": "POST /scan/email",
+            "scan_app_name": "POST /scan/app-name",
+            "scan_app_apk": "POST /scan/app",
             "history": "GET /stats/history",
             "summary": "GET /stats/summary",
             "models_info": "GET /stats/models/info",
@@ -97,8 +125,12 @@ async def root():
 # Health check
 @app.get("/health")
 async def health_check():
-    url_model_exists = Path("backend/models/url_model.pkl").exists()
-    email_model_exists = Path("backend/models/email_model.pkl").exists()
+    from pathlib import Path
+    
+    models_path = Path("backend/models")
+    url_model = (models_path / "url_model.pkl").exists()
+    email_model = (models_path / "email_model.pkl").exists()
+    app_model = (models_path / "app_model.pkl").exists()
     
     return {
         "status": "healthy",
@@ -107,8 +139,9 @@ async def health_check():
             "database": "connected",
             "cache": "active",
             "models": {
-                "url_model": url_model_exists,
-                "email_model": email_model_exists
+                "url_model": url_model,
+                "email_model": email_model,
+                "app_model": app_model
             }
         }
     }
