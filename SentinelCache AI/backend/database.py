@@ -92,6 +92,28 @@ class Database:
                     is_active INTEGER DEFAULT 1
                 )
             """)
+
+            # Users table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT UNIQUE NOT NULL,
+                    email TEXT UNIQUE NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # Create index for faster user lookups
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_users_username 
+                ON users(username)
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_users_email 
+                ON users(email)
+            """)
             
             conn.commit()
             logger.info("SQLite database initialized successfully at: %s", self.sqlite_path)
@@ -190,6 +212,34 @@ class Database:
                 "avg_confidence": round((stats.get('avg_confidence') or 0) * 100, 2),
                 "avg_prediction_time_ms": round(stats.get('avg_time') or 0, 2)
             }
+    
+    def create_user(self, username: str, email: str, password_hash: str) -> int:
+        """Create a new user and return user id"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO users (username, email, password_hash)
+                VALUES (?, ?, ?)
+            """, (username, email, password_hash))
+            conn.commit()
+            return cursor.lastrowid
+
+    def get_user_by_username(self, username: str) -> Optional[dict]:
+        """Retrieve a user by username"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def get_user_by_email(self, email: str) -> Optional[dict]:
+        """Retrieve a user by email"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
     
     # ============ Unified Methods (Try Docker first, fallback to SQLite) ============
     
