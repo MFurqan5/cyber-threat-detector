@@ -92,6 +92,28 @@ class Database:
                     is_active INTEGER DEFAULT 1
                 )
             """)
+
+            # Users table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT UNIQUE NOT NULL,
+                    email TEXT UNIQUE NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # Create index for faster user lookups
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_users_username 
+                ON users(username)
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_users_email 
+                ON users(email)
+            """)
             
             conn.commit()
             logger.info("SQLite database initialized successfully at: %s", self.sqlite_path)
@@ -191,151 +213,33 @@ class Database:
                 "avg_prediction_time_ms": round(stats.get('avg_time') or 0, 2)
             }
     
-    # ============ Unified Methods (Try Docker first, fallback to SQLite) ============
-    
-    def save_scan(self, scan_data: dict):
-        """Save scan to available databases (Docker preferred, SQLite fallback)"""
-        docker_saved = False
-        
-        # Try Docker databases first
-        if self.docker_available and self.ml_integration:
-            try:
-                # Convert to format expected by ml_integration
-                self.ml_integration.save_prediction(
-                    request_id=scan_data.get('session_id', ''),
-                    user_id=scan_data.get('user_id', '22222222-2222-2222-2222-222222222222'),
-                    input_type=scan_data.get('scan_type', 'url'),
-                    input_value=scan_data.get('input_preview', ''),
-                    prediction={
-                        "label": "malicious" if scan_data.get('is_malicious') else "safe",
-                        "threat_type": scan_data.get('threat_type', 'unknown'),
-                        "confidence": scan_data.get('confidence', 0.5),
-                        "explanation": scan_data.get('explanation', ''),
-                        "indicators": scan_data.get('features_used', [])
-                    },
-                    model_version="v1.0",
-                    inference_ms=scan_data.get('prediction_time_ms', 0),
-                    severity="medium",
-                    action_taken="logged"
-                )
-                docker_saved = True
-                logger.info("Scan saved to Docker databases")
-            except Exception as e:
-                logger.error(f"Failed to save to Docker databases: {e}")
-        
-        # Always save to SQLite as backup
-        sqlite_id = self.save_scan_sqlite(scan_data)
-        logger.info(f"Scan saved to SQLite with ID: {sqlite_id}")
-        
-        return {
-            "sqlite_id": sqlite_id,
-            "docker_saved": docker_saved
-        }
-    
-    def get_scans(self, limit: int = 100, offset: int = 0, 
-                  scan_type: Optional[str] = None, 
-                  malicious_only: bool = False) -> Dict:
-        """Get scans from all available sources"""
-        results = {
-            "sqlite": self.get_scans_sqlite(limit, offset, scan_type, malicious_only),
-            "docker": []
-        }
-        
-        # Try to get from Docker if available
-        if self.docker_available and self.ml_integration:
-            try:
-                conn = self.ml_integration.get_postgres_connection()
-                cur = conn.cursor()
-                
-                query = """
-                    SELECT sr.id, sr.input_type, sr.input_value, sr.created_at,
-                           ap.prediction_label, ap.threat_type, ap.confidence_score, 
-                           ap.explanation, ap.model_version, ap.inference_ms
-                    FROM scan_requests sr
-                    LEFT JOIN ai_predictions ap ON sr.id = ap.request_id
-                    WHERE 1=1
-                """
-                params = []
-                
-                if scan_type:
-                    query += " AND sr.input_type = %s"
-                    params.append(scan_type)
-                
-                if malicious_only:
-                    query += " AND ap.prediction_label = 'malicious'"
-                
-                query += " ORDER BY sr.created_at DESC LIMIT %s OFFSET %s"
-                params.extend([limit, offset])
-                
-                cur.execute(query, params)
-                rows = cur.fetchall()
-                cur.close()
-                
-                for row in rows:
-                    results["docker"].append({
-                        "id": row[0],
-                        "type": row[1],
-                        "input": row[2][:200] if row[2] else "",
-                        "timestamp": row[3].isoformat() if row[3] else None,
-                        "prediction": row[4],
-                        "threat_type": row[5],
-                        "confidence": row[6],
-                        "explanation": row[7],
-                        "model": row[8],
-                        "inference_ms": row[9]
-                    })
-            except Exception as e:
-                logger.error(f"Failed to get scans from Docker: {e}")
-        
-        return results
-    
-    def get_stats(self, hours: int = 24) -> Dict:
-        """Get statistics from all sources"""
-        return {
-            "sqlite": self.get_stats_sqlite(hours),
-            "docker": self.get_docker_stats(hours) if self.docker_available else {"available": False}
-        }
-    
-    def get_docker_stats(self, hours: int = 24) -> dict:
-        """Get statistics from Docker databases"""
-        if not self.docker_available or not self.ml_integration:
-            return {"available": False}
-        
-        try:
-            conn = self.ml_integration.get_postgres_connection()
-            cur = conn.cursor()
-            
-            cur.execute("""
-                SELECT 
-                    COUNT(*) as total_scans,
-                    SUM(CASE WHEN input_type = 'url' THEN 1 ELSE 0 END) as url_scans,
-                    SUM(CASE WHEN input_type = 'email' THEN 1 ELSE 0 END) as email_scans,
-                    SUM(CASE WHEN ap.prediction_label = 'malicious' THEN 1 ELSE 0 END) as malicious_total,
-                    AVG(ap.confidence_score) as avg_confidence
-                FROM scan_requests sr
-                LEFT JOIN ai_predictions ap ON sr.id = ap.request_id
-                WHERE sr.created_at >= NOW() - INTERVAL '%s hours'
-            """, (hours,))
-            
-            row = cur.fetchone()
-            cur.close()
-            
-            return {
-                "source": "postgresql",
-                "period_hours": hours,
-                "total_scans": row[0] or 0,
-                "by_type": {
-                    "url": row[1] or 0,
-                    "email": row[2] or 0
-                },
-                "malicious_total": row[3] or 0,
-                "avg_confidence": round((row[4] or 0) * 100, 2),
-                "available": True
-            }
-        except Exception as e:
-            logger.error(f"Failed to get Docker stats: {e}")
-            return {"available": False, "error": str(e)}
-    
+    def create_user(self, username: str, email: str, password_hash: str) -> int:
+        """Create a new user and return user id"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO users (username, email, password_hash)
+                VALUES (?, ?, ?)
+            """, (username, email, password_hash))
+            conn.commit()
+            return cursor.lastrowid
+
+    def get_user_by_username(self, username: str) -> Optional[dict]:
+        """Retrieve a user by username"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def get_user_by_email(self, email: str) -> Optional[dict]:
+        """Retrieve a user by email"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
     def log_model_load(self, model_name: str, version: str = "1.0.0"):
         """Log model loading event to SQLite"""
         with self.get_sqlite_connection() as conn:
