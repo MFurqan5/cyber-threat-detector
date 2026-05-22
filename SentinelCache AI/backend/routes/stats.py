@@ -72,11 +72,17 @@ async def get_history(
         }
     except Exception as e:
         logger.error(f"Error in get_history: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         return {"total": 0, "scans": [], "error": str(e)}
 
 @router.get("/summary")
 async def get_summary(hours: int = Query(24, ge=1, le=720)):
-    """Get summary statistics from PostgreSQL"""
+    """Get summary statistics from PostgreSQL and cache layers"""
+    if not isinstance(hours, (int, float)):
+        hours = getattr(hours, "default", 24)
     try:
         conn = ml_db.get_postgres_connection()
         cur = conn.cursor()
@@ -100,6 +106,22 @@ async def get_summary(hours: int = Query(24, ge=1, le=720)):
         total = row[0] or 0
         malicious = row[3] or 0
         
+        # Get real cache stats from ml_db
+        cache_stats = {"l1": {"hits": 0, "misses": 0, "hit_rate": 0}, "l2": {"hits": 0, "misses": 0, "hit_rate": 0}, "l3": {"hits": 0, "misses": 0, "hit_rate": 0}}
+        cache_hit_rate = 0.0
+        try:
+            cache_stats = ml_db.get_cache_stats()
+            l1 = cache_stats.get("l1", {"hits": 0, "misses": 0, "hit_rate": 0})
+            l2 = cache_stats.get("l2", {"hits": 0, "misses": 0, "hit_rate": 0})
+            l3 = cache_stats.get("l3", {"hits": 0, "misses": 0, "hit_rate": 0})
+            
+            total_hits = l1.get("hits", 0) + l2.get("hits", 0) + l3.get("hits", 0)
+            total_misses = l1.get("misses", 0) + l2.get("misses", 0) + l3.get("misses", 0)
+            total_cache_reqs = total_hits + total_misses
+            cache_hit_rate = total_hits / total_cache_reqs if total_cache_reqs > 0 else 0.0
+        except Exception as ce:
+            logger.warning(f"Failed to calculate cache summary stats: {ce}")
+        
         return {
             "period_hours": hours,
             "total_scans": total,
@@ -112,10 +134,16 @@ async def get_summary(hours: int = Query(24, ge=1, le=720)):
             "malicious_total": malicious,
             "avg_confidence": round((row[4] or 0) * 100, 2),
             "avg_time_ms": round(row[5] or 0, 2),
+            "cache_hit_rate": cache_hit_rate,
+            "cache": cache_stats,
             "timestamp": datetime.now().isoformat()
         }
     except Exception as e:
         logger.error(f"Error in get_summary: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         return {
             "period_hours": hours,
             "total_scans": 0,
@@ -123,6 +151,12 @@ async def get_summary(hours: int = Query(24, ge=1, le=720)):
             "threats_detected": 0,
             "safe_requests": 0,
             "avg_confidence": 0,
+            "cache_hit_rate": 0.0,
+            "cache": {
+                "l1": {"hits": 0, "misses": 0, "hit_rate": 0},
+                "l2": {"hits": 0, "misses": 0, "hit_rate": 0},
+                "l3": {"hits": 0, "misses": 0, "hit_rate": 0}
+            },
             "timestamp": datetime.now().isoformat()
         }
 
@@ -141,13 +175,15 @@ async def get_cache_status():
             },
             "l2": {
                 "hit_rate": stats["l2"]["hit_rate"],
-                "hits": stats["l2"]["keys"],
-                "misses": stats["l2"]["misses"]
+                "hits": stats["l2"]["hits"],
+                "misses": stats["l2"]["misses"],
+                "keys": stats["l2"]["keys"]
             },
             "l3": {
                 "hit_rate": stats["l3"]["hit_rate"],
-                "hits": stats["l3"]["documents"],
-                "misses": stats["l3"]["misses"]
+                "hits": stats["l3"]["hits"],
+                "misses": stats["l3"]["misses"],
+                "documents": stats["l3"]["documents"]
             },
             "timestamp": datetime.now().isoformat()
         }

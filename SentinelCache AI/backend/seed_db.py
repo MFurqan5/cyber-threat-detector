@@ -17,13 +17,11 @@ from pymongo import MongoClient
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 
-# ─────────────────────────────────────────────────────────────
-# Load Environment Variables
-# ─────────────────────────────────────────────────────────────
-
-load_dotenv(
-    r"D:\4th semester\ADBL\FinalProject\cyber-threat-detector\SentinelCache AI\backend\URLs.env"
-)
+dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "URLs.env")
+if os.path.exists(dotenv_path):
+    load_dotenv(dotenv_path)
+else:
+    load_dotenv()
 
 # ─────────────────────────────────────────────────────────────
 # Database URLs
