@@ -16,7 +16,11 @@ import logging
 import uuid
 
 # Force load .env
-load_dotenv(r"D:\4th semester\ADBL\FinalProject\cyber-threat-detector\SentinelCache AI\backend\URLs.env")
+dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "URLs.env")
+if os.path.exists(dotenv_path):
+    load_dotenv(dotenv_path)
+else:
+    load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Database connections
@@ -87,32 +91,41 @@ class MLDatabaseIntegration:
             logger.warning(f"Failed to track cache miss: {e}")
     
     def get_cache_stats(self):
-        """Get real cache statistics from Redis"""
+        """Get real cache statistics from Redis for all three layers"""
         try:
             redis_client = self.get_redis_client()
             
-            # Get L2 (Redis) stats
-            l2_hits = int(redis_client.hget("cache_stats:l2", "hits") or 0)
-            l2_misses = int(redis_client.hget("cache_stats:l2", "misses") or 0)
-            
-            # Count actual Redis keys (current cache size)
-            redis_keys = len(redis_client.keys("threat:v1:*"))
-            
-            # Get MongoDB stats
-            mongo_client = self.get_mongo_client()
-            mongo_count = 0
-            if mongo_client:
-                db = mongo_client["Cache_db"]
-                collection = db["cache_results"]
-                mongo_count = collection.count_documents({})
-            
-            # L1 stats (in-memory) - track separately if needed
+            # Get L1 stats
             l1_hits = int(redis_client.hget("cache_stats:l1", "hits") or 0)
             l1_misses = int(redis_client.hget("cache_stats:l1", "misses") or 0)
-            
-            # Calculate hit rates
             l1_total = l1_hits + l1_misses
+            
+            # Get L2 stats
+            l2_hits = int(redis_client.hget("cache_stats:l2", "hits") or 0)
+            l2_misses = int(redis_client.hget("cache_stats:l2", "misses") or 0)
             l2_total = l2_hits + l2_misses
+            
+            # Get L3 stats
+            l3_hits = int(redis_client.hget("cache_stats:l3", "hits") or 0)
+            l3_misses = int(redis_client.hget("cache_stats:l3", "misses") or 0)
+            l3_total = l3_hits + l3_misses
+            
+            # Additional info
+            redis_keys = 0
+            try:
+                redis_keys = len(redis_client.keys("threat:v1:*"))
+            except Exception:
+                pass
+                
+            mongo_count = 0
+            try:
+                mongo_client = self.get_mongo_client()
+                if mongo_client:
+                    db = mongo_client["Cache_db"]
+                    collection = db["cache_results"]
+                    mongo_count = collection.count_documents({})
+            except Exception:
+                pass
             
             return {
                 "l1": {
@@ -121,16 +134,16 @@ class MLDatabaseIntegration:
                     "hit_rate": round(l1_hits / l1_total, 2) if l1_total > 0 else 0
                 },
                 "l2": {
-                    "hits": redis_keys,  # Current keys in Redis
+                    "hits": l2_hits,
                     "misses": l2_misses,
                     "keys": redis_keys,
                     "hit_rate": round(l2_hits / l2_total, 2) if l2_total > 0 else 0
                 },
                 "l3": {
-                    "hits": mongo_count,  # Documents in MongoDB
-                    "misses": 0,
+                    "hits": l3_hits,
+                    "misses": l3_misses,
                     "documents": mongo_count,
-                    "hit_rate": 0.58 if mongo_count > 0 else 0
+                    "hit_rate": round(l3_hits / l3_total, 2) if l3_total > 0 else 0
                 }
             }
         except Exception as e:
@@ -174,7 +187,7 @@ class MLDatabaseIntegration:
                     status = 'complete',
                     created_at = EXCLUDED.created_at
                 RETURNING id
-            """, (request_id, user_id, input_type, input_value[:500], input_hash, datetime.now()))
+            """, (request_id, user_id, input_type, input_value[:500], input_hash, datetime.utcnow()))
             
             result = cur.fetchone()
             final_request_id = result[0] if result else request_id
@@ -196,14 +209,14 @@ class MLDatabaseIntegration:
                 json.dumps(prediction.get("indicators", [])),
                 model_version,
                 int(inference_ms),
-                datetime.now()
+                datetime.utcnow()
             ))
             
             # Insert into threat_logs
             cur.execute("""
                 INSERT INTO threat_logs (prediction_id, severity, action_taken, notes, created_at)
                 VALUES (%s, %s, %s, %s, %s)
-            """, (prediction_id, severity, action_taken, f"ML Prediction: {prediction.get('explanation', '')[:200]}", datetime.now()))
+            """, (prediction_id, severity, action_taken, f"ML Prediction: {prediction.get('explanation', '')[:200]}", datetime.utcnow()))
             
             conn.commit()
             cur.close()
@@ -212,18 +225,30 @@ class MLDatabaseIntegration:
             
         except Exception as e:
             logger.error(f"❌ PostgreSQL save failed: {e}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         
-        # 2. Save to Redis Cache
+        # 1.5 Save to L1 Memory Cache & L2 Redis Cache
+        redis_data = {
+            "label": prediction.get("label"),
+            "type": prediction.get("threat_type"),
+            "score": prediction.get("confidence"),
+            "indicators": prediction.get("indicators", []),
+            "model": model_version,
+            **{k: v for k, v in prediction.items() if k not in ["label", "threat_type", "confidence", "indicators", "model"]}
+        }
+        try:
+            l1_key = cache_manager.get_prediction_cache_key(input_value, input_type)
+            cache_manager.cache_prediction(l1_key, redis_data)
+            logger.info(f"✅ Saved to L1 Cache: {l1_key}")
+        except Exception as e:
+            logger.warning(f"⚠️ L1 Cache save failed: {e}")
+
         try:
             redis_client = self.get_redis_client()
             cache_key = f"threat:v1:{input_hash}"
-            redis_data = {
-                "label": prediction.get("label"),
-                "type": prediction.get("threat_type"),
-                "score": prediction.get("confidence"),
-                "indicators": prediction.get("indicators", []),
-                "model": model_version
-            }
             redis_client.setex(cache_key, 3600, json.dumps(redis_data))
             saved["redis"] = True
             logger.info(f"✅ Saved to Redis: {cache_key}")
@@ -247,7 +272,8 @@ class MLDatabaseIntegration:
                             "threat_type": prediction.get("threat_type"),
                             "confidence_score": prediction.get("confidence"),
                             "explanation": prediction.get("explanation", ""),
-                            "indicators": prediction.get("indicators", [])
+                            "indicators": prediction.get("indicators", []),
+                            **{k: v for k, v in prediction.items() if k not in ["label", "threat_type", "confidence", "explanation", "indicators"]}
                         },
                         "model_version": model_version,
                         "hit_count": 0,
@@ -273,29 +299,97 @@ class MLDatabaseIntegration:
         }
     
     def check_cache(self, input_value: str, input_type: str):
-        """Check Redis cache first and track statistics"""
+        """Check L1 Memory, L2 Redis, and L3 MongoDB caches sequentially and track statistics"""
         input_hash = hashlib.sha256(input_value.encode()).hexdigest()
+        l1_key = cache_manager.get_prediction_cache_key(input_value, input_type)
         
+        # 1. Check L1 Memory Cache
         try:
-            redis_client = self.get_redis_client()
-            cache_key = f"threat:v1:{input_hash}"
-            cached = redis_client.get(cache_key)
-            
-            if cached:
-                # CACHE HIT - track it
-                self.increment_cache_hit("l2")
-                logger.info(f"Redis cache hit for {input_type}")
+            cached_l1 = cache_manager.prediction_cache.get(l1_key)
+            if cached_l1:
+                self.increment_cache_hit("l1")
+                cache_manager.hits += 1
+                logger.info(f"L1 memory cache hit for {input_type}")
                 return {
-                    "from_cache": "redis",
-                    "result": json.loads(cached),
+                    "from_cache": "L1",
+                    "result": cached_l1,
                     "input_hash": input_hash
                 }
             else:
-                # CACHE MISS - track it
-                self.increment_cache_miss("l2")
-                logger.info(f"Redis cache miss for {input_type}")
+                self.increment_cache_miss("l1")
+                cache_manager.misses += 1
+                logger.info(f"L1 memory cache miss for {input_type}")
         except Exception as e:
-            logger.warning(f"Redis cache check failed: {e}")
+            logger.warning(f"L1 memory cache check failed: {e}")
+
+        # 2. Check L2 Redis Cache
+        cache_key = f"threat:v1:{input_hash}"
+        try:
+            redis_client = self.get_redis_client()
+            cached_l2_str = redis_client.get(cache_key)
+            if cached_l2_str:
+                self.increment_cache_hit("l2")
+                logger.info(f"L2 Redis cache hit for {input_type}")
+                cached_l2 = json.loads(cached_l2_str)
+                
+                # Populate back to L1 Memory
+                try:
+                    cache_manager.cache_prediction(l1_key, cached_l2)
+                except Exception as ex:
+                    logger.warning(f"Failed to populate L1 from L2: {ex}")
+                
+                return {
+                    "from_cache": "L2",
+                    "result": cached_l2,
+                    "input_hash": input_hash
+                }
+            else:
+                self.increment_cache_miss("l2")
+                logger.info(f"L2 Redis cache miss for {input_type}")
+        except Exception as e:
+            logger.warning(f"L2 Redis cache check failed: {e}")
+
+        # 3. Check L3 MongoDB Cache
+        if MONGO_URL:
+            try:
+                mongo_client = self.get_mongo_client()
+                if mongo_client:
+                    db = mongo_client["Cache_db"]
+                    collection = db["cache_results"]
+                    cached_l3_doc = collection.find_one({"input_hash": input_hash})
+                    
+                    if cached_l3_doc:
+                        self.increment_cache_hit("l3")
+                        logger.info(f"L3 MongoDB cache hit for {input_type}")
+                        
+                        l3_res = cached_l3_doc.get("result", {})
+                        result_data = {
+                            "label": l3_res.get("prediction_label"),
+                            "type": l3_res.get("threat_type"),
+                            "score": l3_res.get("confidence_score"),
+                            "indicators": l3_res.get("indicators", []),
+                            "model": cached_l3_doc.get("model_version", "unknown"),
+                            **{k: v for k, v in l3_res.items() if k not in ["prediction_label", "threat_type", "confidence_score", "indicators"]}
+                        }
+                        
+                        # Populate back to L2 Redis and L1 Memory
+                        try:
+                            cache_manager.cache_prediction(l1_key, result_data)
+                            redis_client = self.get_redis_client()
+                            redis_client.setex(cache_key, 3600, json.dumps(result_data))
+                        except Exception as ex:
+                            logger.warning(f"Failed to populate L1/L2 from L3: {ex}")
+                        
+                        return {
+                            "from_cache": "L3",
+                            "result": result_data,
+                            "input_hash": input_hash
+                        }
+                    else:
+                        self.increment_cache_miss("l3")
+                        logger.info(f"L3 MongoDB cache miss for {input_type}")
+            except Exception as e:
+                logger.warning(f"L3 MongoDB cache check failed: {e}")
         
         return None
     
@@ -311,6 +405,10 @@ class MLDatabaseIntegration:
             return result[0] if result else None
         except Exception as e:
             logger.error(f"Failed to get user_id: {e}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             return None
 
 # Global instance
@@ -318,42 +416,4 @@ ml_db = MLDatabaseIntegration()
 
 
 
-def get_cache_stats(self):
-    """Get real cache statistics from all layers"""
-    try:
-        redis_client = self.get_redis_client()
-        
-        # Get L1 stats from memory cache
-        l1_stats = cache_manager.get_cache_stats()
-        
-        # Get L2 stats
-        redis_keys = len(redis_client.keys("threat:v1:*"))
-        l2_hits = int(redis_client.hget("cache_stats:l2", "hits") or 0)
-        l2_misses = int(redis_client.hget("cache_stats:l2", "misses") or 0)
-        
-        # Get L3 stats
-        mongo_client = self.get_mongo_client()
-        mongo_count = 0
-        if mongo_client:
-            db = mongo_client["Cache_db"]
-            collection = db["cache_results"]
-            mongo_count = collection.count_documents({})
-        
-        return {
-            "l1": l1_stats["l1"],  # Now includes real L1 stats!
-            "l2": {
-                "hits": redis_keys,
-                "misses": l2_misses,
-                "keys": redis_keys,
-                "hit_rate": round(l2_hits / (l2_hits + l2_misses), 2) if (l2_hits + l2_misses) > 0 else 0
-            },
-            "l3": {
-                "hits": mongo_count,
-                "misses": 0,
-                "documents": mongo_count,
-                "hit_rate": 0.58 if mongo_count > 0 else 0
-            }
-        }
-    except Exception as e:
-        logger.error(f"Failed to get cache stats: {e}")
-        return {...}
+# redundant global function removed
