@@ -411,9 +411,72 @@ class MLDatabaseIntegration:
                 pass
             return None
 
+    def create_user_postgres(self, username: str, email: str, password_hash: str) -> str:
+        """Create a new user in PostgreSQL and return user id (UUID string)"""
+        conn = self.get_postgres_connection()
+        cur = conn.cursor()
+        user_id = str(uuid.uuid4())
+        try:
+            cur.execute("""
+                INSERT INTO users (id, username, email, password_hash, role)
+                VALUES (%s, %s, %s, %s, 'user')
+            """, (user_id, username, email, password_hash))
+            conn.commit()
+            return user_id
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"PostgreSQL create_user failed: {e}")
+            raise
+        finally:
+            cur.close()
+
+    def get_user_by_username_postgres(self, username: str) -> Optional[dict]:
+        """Retrieve a user by username from PostgreSQL"""
+        conn = self.get_postgres_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cur.execute("SELECT id, username, email, password_hash, role, created_at FROM users WHERE username = %s", (username,))
+            row = cur.fetchone()
+            if row:
+                return {
+                    "id": str(row["id"]),
+                    "username": row["username"],
+                    "email": row["email"],
+                    "password_hash": row["password_hash"],
+                    "role": row.get("role", "user"),
+                    "created_at": row["created_at"].isoformat() if row.get("created_at") else None
+                }
+            return None
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"PostgreSQL get_user_by_username failed: {e}")
+            raise
+        finally:
+            cur.close()
+
+    def get_user_by_email_postgres(self, email: str) -> Optional[dict]:
+        """Retrieve a user by email from PostgreSQL"""
+        conn = self.get_postgres_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cur.execute("SELECT id, username, email, password_hash, role, created_at FROM users WHERE email = %s", (email,))
+            row = cur.fetchone()
+            if row:
+                return {
+                    "id": str(row["id"]),
+                    "username": row["username"],
+                    "email": row["email"],
+                    "password_hash": row["password_hash"],
+                    "role": row.get("role", "user"),
+                    "created_at": row["created_at"].isoformat() if row.get("created_at") else None
+                }
+            return None
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"PostgreSQL get_user_by_email failed: {e}")
+            raise
+        finally:
+            cur.close()
+
 # Global instance
 ml_db = MLDatabaseIntegration()
-
-
-
-# redundant global function removed
