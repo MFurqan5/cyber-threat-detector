@@ -40,6 +40,10 @@ class Database:
         conn = sqlite3.connect(self.sqlite_path)
         conn.row_factory = sqlite3.Row
         return conn
+        
+    def get_connection(self):
+        """Get SQLite database connection (alias for get_sqlite_connection)"""
+        return self.get_sqlite_connection()
     
     def init_sqlite(self):
         """Initialize SQLite database tables"""
@@ -213,20 +217,32 @@ class Database:
                 "avg_prediction_time_ms": round(stats.get('avg_time') or 0, 2)
             }
     
-    def create_user(self, username: str, email: str, password_hash: str) -> int:
+    def create_user(self, username: str, email: str, password_hash: str) -> str:
         """Create a new user and return user id"""
-        with self.get_connection() as conn:
+        if self.docker_available and self.ml_integration:
+            try:
+                return self.ml_integration.create_user_postgres(username, email, password_hash)
+            except Exception as e:
+                logger.error(f"PostgreSQL create_user failed, falling back to SQLite: {e}")
+                
+        with self.get_sqlite_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO users (username, email, password_hash)
                 VALUES (?, ?, ?)
             """, (username, email, password_hash))
             conn.commit()
-            return cursor.lastrowid
+            return str(cursor.lastrowid)
 
     def get_user_by_username(self, username: str) -> Optional[dict]:
         """Retrieve a user by username"""
-        with self.get_connection() as conn:
+        if self.docker_available and self.ml_integration:
+            try:
+                return self.ml_integration.get_user_by_username_postgres(username)
+            except Exception as e:
+                logger.error(f"PostgreSQL get_user_by_username failed, falling back to SQLite: {e}")
+                
+        with self.get_sqlite_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
             row = cursor.fetchone()
@@ -234,7 +250,13 @@ class Database:
 
     def get_user_by_email(self, email: str) -> Optional[dict]:
         """Retrieve a user by email"""
-        with self.get_connection() as conn:
+        if self.docker_available and self.ml_integration:
+            try:
+                return self.ml_integration.get_user_by_email_postgres(email)
+            except Exception as e:
+                logger.error(f"PostgreSQL get_user_by_email failed, falling back to SQLite: {e}")
+                
+        with self.get_sqlite_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
             row = cursor.fetchone()
