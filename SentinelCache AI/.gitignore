@@ -3,7 +3,8 @@
 
 # ML models & datasets — too large for GitHub
 ml_training/datasets/*.csv
-
+ml_training/models/*.pkl
+backend/models/*.pkl
 # Python
 __pycache__/
 *.pyc
