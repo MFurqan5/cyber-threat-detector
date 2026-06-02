@@ -29,9 +29,12 @@ print("=" * 60)
 print("URL PHISHING MODEL TRAINING (API COMPATIBLE)")
 print("=" * 60)
 
-csv_path = os.path.join(BASE_DIR, 'datasets', 'urlset.csv')
-print(f"Loading raw dataset from: {csv_path}")
-df = pd.read_csv(csv_path, encoding='latin-1', on_bad_lines='skip', low_memory=False)
+csv_path_mal = os.path.join(BASE_DIR, 'datasets', 'urlset.csv')
+csv_path_ben = os.path.join(BASE_DIR, 'datasets', 'benign_domains_dataset.csv')
+print(f"Loading raw datasets from:\n - {csv_path_mal}\n - {csv_path_ben}")
+df_mal = pd.read_csv(csv_path_mal, encoding='latin-1', on_bad_lines='skip', low_memory=False)
+df_ben = pd.read_csv(csv_path_ben, encoding='latin-1', on_bad_lines='skip', low_memory=False)
+df = pd.concat([df_mal, df_ben], ignore_index=True)
 
 print("Preprocessing for API conformity...")
 df = df.dropna(subset=['label'])
@@ -57,10 +60,7 @@ print(f"Test set:  {X_test.shape[0]} samples")
 
 # ── Define Models ──
 models = {
-    'Decision Tree': DecisionTreeClassifier(random_state=42),
     'Random Forest': RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
-    'SVM': SVC(kernel='rbf', random_state=42),
-    'XGBoost': GradientBoostingClassifier(n_estimators=100, random_state=42),
 }
 
 # ── Train & Evaluate All Models ──
@@ -95,103 +95,20 @@ for name, model in models.items():
     print(f"\nClassification Report:\n{classification_report(y_test, y_pred, target_names=['Malicious', 'Safe'])}")
     print(f"Confusion Matrix:\n{confusion_matrix(y_test, y_pred)}")
 
-# ── Hyperparameter Tuning for ALL Models ──
-print("\n" + "=" * 60)
-print("HYPERPARAMETER TUNING (RandomizedSearchCV - All Models)")
+# Skipping hyperparameter tuning to save time.
+# Best model is just our Random Forest.
+best = results[0]
+
+# ── Final Comparison (Base vs Tuned) ──
+print("FINAL MODEL COMPARISON")
 print("=" * 60)
 
-from sklearn.model_selection import RandomizedSearchCV
-
-tuning_configs = {
-    'Decision Tree': {
-        'model': DecisionTreeClassifier(random_state=42),
-        'params': {
-            'max_depth': [5, 10, 20, 30, 50, None],
-            'min_samples_split': [2, 3, 5, 10],
-            'min_samples_leaf': [1, 2, 4],
-            'criterion': ['gini', 'entropy'],
-        }
-    },
-    'Random Forest': {
-        'model': RandomForestClassifier(random_state=42, n_jobs=-1),
-        'params': {
-            'n_estimators': [100, 200, 300, 500],
-            'max_depth': [10, 20, 30, 50, None],
-            'min_samples_split': [2, 3, 5],
-            'min_samples_leaf': [1, 2],
-            'max_features': ['sqrt', 'log2', None],
-        }
-    },
-    'XGBoost': {
-        'model': GradientBoostingClassifier(random_state=42),
-        'params': {
-            'n_estimators': [100, 200, 300, 500],
-            'learning_rate': [0.01, 0.05, 0.1, 0.2],
-            'max_depth': [3, 5, 7, 10],
-            'min_samples_split': [2, 5, 10],
-            'subsample': [0.8, 0.9, 1.0],
-        }
-    },
-}
-
-tuned_results = []
-
-for name, config in tuning_configs.items():
-    print(f"\n{'-' * 40}")
-    print(f"Tuning: {name}")
-    print(f"{'-' * 40}")
-
-    grid = RandomizedSearchCV(
-        config['model'],
-        config['params'],
-        n_iter=3,
-        cv=3,
-        scoring='f1',
-        n_jobs=-1,
-        verbose=1,
-        random_state=42
-    )
-    grid.fit(X_train, y_train)
-
-    best_model = grid.best_estimator_
-    y_pred = best_model.predict(X_test)
-
-    acc = accuracy_score(y_test, y_pred)
-    prec = precision_score(y_test, y_pred)
-    rec = recall_score(y_test, y_pred)
-    f1 = f1_score(y_test, y_pred)
-
-    tuned_results.append({
-        'Model': f'{name} (Tuned)',
-        'Accuracy': acc,
-        'Precision': prec,
-        'Recall': rec,
-        'F1 Score': f1,
-        'model_obj': best_model
-    })
-
-    print(f"Best Params: {grid.best_params_}")
-    print(f"Best CV F1:  {grid.best_score_:.4f}")
-    print(f"Accuracy:    {acc:.4f}")
-    print(f"Precision:   {prec:.4f}")
-    print(f"Recall:      {rec:.4f}")
-    print(f"F1 Score:    {f1:.4f}")
-    print(f"\nClassification Report:\n{classification_report(y_test, y_pred, target_names=['Malicious', 'Safe'])}")
-    print(f"Confusion Matrix:\n{confusion_matrix(y_test, y_pred)}")
-
-# ── Final Comparison (Base + Tuned) ──
-all_results = results + tuned_results
-
-print("\n" + "=" * 60)
-print("FINAL MODEL COMPARISON (Base vs Tuned)")
-print("=" * 60)
-
-results_df = pd.DataFrame(all_results).drop(columns=['model_obj'])
+results_df = pd.DataFrame(results).drop(columns=['model_obj'])
 results_df = results_df.sort_values('F1 Score', ascending=False).reset_index(drop=True)
 print(results_df.to_string(index=False))
 
 # ── Best Model ──
-best = max(all_results, key=lambda x: x['F1 Score'])
+best = max(results, key=lambda x: x['F1 Score'])
 print(f"\nBest Model: {best['Model']} (F1 Score: {best['F1 Score']:.4f})")
 
 # ── Save Best Model and Export to Backend ──

@@ -13,9 +13,23 @@ import uuid
 import logging
 
 from backend.db.ml_integration import ml_db
+from backend.routes.auth import decode_token
+from fastapi import Request
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/scan", tags=["scan"])
+
+def _extract_user_id(request: Request) -> Optional[str]:
+    """Try to extract user_id from the Authorization header (Bearer token).
+    Returns None if no token or invalid token — never raises."""
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        uid = decode_token(token)
+        if uid:
+            return str(uid)
+    return None
+
 
 class URLScanRequest(BaseModel):
     url: HttpUrl
@@ -46,13 +60,13 @@ def extract_url_features(url: str) -> np.ndarray:
     return extract_url_features_single(url)
 
 def load_model(model_name: str):
-    """Load model from pickle file"""
+    """Load model from joblib file"""
     model_path = Path(f"backend/models/{model_name}.pkl")
     
     if model_path.exists():
         try:
-            with open(model_path, 'rb') as f:
-                return pickle.load(f)
+            import joblib
+            return joblib.load(model_path)
         except Exception as e:
             logger.error(f"Error loading model {model_name}: {e}")
             return None
@@ -158,7 +172,7 @@ def get_email_explanation(email_text: str, score: float) -> tuple:
     return threat_type, explanation, indicators
 
 @router.post("/url", response_model=ScanResponse)
-async def scan_url(request: URLScanRequest, background_tasks: BackgroundTasks):
+async def scan_url(request: URLScanRequest, background_tasks: BackgroundTasks, raw_request: Request):
     """Scan URL for phishing detection - integrates with existing database"""
     import time
     
@@ -167,7 +181,9 @@ async def scan_url(request: URLScanRequest, background_tasks: BackgroundTasks):
     
     logger.info(f"Scanning URL: {url_str[:100]}...")
     
-    user_id = request.user_id
+    user_id = _extract_user_id(raw_request)
+    if not user_id:
+        user_id = request.user_id
     if not user_id and request.email:
         try:
             user_id = ml_db.get_user_id(request.email)
@@ -222,9 +238,10 @@ async def scan_url(request: URLScanRequest, background_tasks: BackgroundTasks):
         logger.info(f"Using fallback prediction (model not loaded): score={score:.3f}, prediction={prediction}")
     else:
         try:
-            prediction = int(model.predict(features_array)[0])
-            score = float(max(model.predict_proba(features_array)[0]))
-            logger.info(f"Model prediction: score={score:.3f}, prediction={prediction}")
+            proba = model.predict_proba(features_array)[0]
+            score = float(proba[1])  # index 1 = malicious class probability
+            prediction = 1 if score > 0.5 else 0
+            logger.info(f"Model prediction: malicious_prob={score:.3f}, prediction={prediction}")
         except Exception as e:
             logger.error(f"Model prediction failed: {e}")
             score = 0.3
@@ -308,7 +325,7 @@ async def scan_url(request: URLScanRequest, background_tasks: BackgroundTasks):
     except Exception as e:
         logger.error(f"❌ Failed to schedule save: {e}")
 @router.post("/email", response_model=ScanResponse)
-async def scan_email(request: EmailScanRequest, background_tasks: BackgroundTasks):
+async def scan_email(request: EmailScanRequest, background_tasks: BackgroundTasks, raw_request: Request):
     """Scan email content - integrates with existing database"""
     import time
     
@@ -318,7 +335,9 @@ async def scan_email(request: EmailScanRequest, background_tasks: BackgroundTask
     
     logger.info(f"Scanning email: '{email_preview[:50]}...'")
     
-    user_id = request.user_id
+    user_id = _extract_user_id(raw_request)
+    if not user_id:
+        user_id = request.user_id
     if not user_id and request.email:
         try:
             user_id = ml_db.get_user_id(request.email)
@@ -439,7 +458,7 @@ class AppSearchRequest(BaseModel):
     app_name: str
 
 @router.post("/app")
-async def scan_app(background_tasks: BackgroundTasks, file: UploadFile = File(...), user_id: Optional[str] = None):
+async def scan_app(background_tasks: BackgroundTasks, raw_request: Request, file: UploadFile = File(...), user_id: Optional[str] = None):
     """Scan file upload for malware detection and check cache"""
     import time
     start_time = time.time()
@@ -452,6 +471,9 @@ async def scan_app(background_tasks: BackgroundTasks, file: UploadFile = File(..
     logger.info(f"Scanning file: {file_name} ({file_size} bytes), hash: {file_hash[:16]}...")
     
     # Determine user_id
+    extracted_id = _extract_user_id(raw_request)
+    if extracted_id:
+        user_id = extracted_id
     if not user_id:
         user_id = "22222222-2222-2222-2222-222222222222"
         
@@ -539,7 +561,7 @@ async def scan_app(background_tasks: BackgroundTasks, file: UploadFile = File(..
     }
 
 @router.post("/app-name")
-async def search_app_safety(request: AppSearchRequest, background_tasks: BackgroundTasks, user_id: Optional[str] = None):
+async def search_app_safety(request: AppSearchRequest, background_tasks: BackgroundTasks, raw_request: Request, user_id: Optional[str] = None):
     """Search if an app is verified safe and check cache"""
     import time
     start_time = time.time()
@@ -548,6 +570,9 @@ async def search_app_safety(request: AppSearchRequest, background_tasks: Backgro
     logger.info(f"Searching app safety: '{app_query}'")
     
     # Determine user_id
+    extracted_id = _extract_user_id(raw_request)
+    if extracted_id:
+        user_id = extracted_id
     if not user_id:
         user_id = "22222222-2222-2222-2222-222222222222"
         

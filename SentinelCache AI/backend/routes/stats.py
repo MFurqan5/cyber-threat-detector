@@ -1,6 +1,7 @@
 # backend/routes/stats.py
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import Optional, List, Dict
+from backend.routes.auth import get_current_user
 from datetime import datetime, timedelta
 import json
 import logging
@@ -18,7 +19,8 @@ async def get_history(
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     scan_type: Optional[str] = Query(None, pattern="^(url|email|file|app)$"),
-    malicious_only: bool = False
+    malicious_only: bool = False,
+    user_id: Optional[str] = None
 ):
     """Get scan history from PostgreSQL"""
     if not isinstance(limit, int):
@@ -48,6 +50,10 @@ async def get_history(
         
         if malicious_only:
             query += " AND ap.prediction_label = 'malicious'"
+            
+        if user_id:
+            query += " AND sr.user_id = %s::uuid"
+            params.append(user_id)
         
         query += " ORDER BY sr.created_at DESC LIMIT %s OFFSET %s"
         params.extend([limit, offset])
@@ -85,8 +91,7 @@ async def get_history(
             pass
         return {"total": 0, "scans": [], "error": str(e)}
 
-@router.get("/summary")
-async def get_summary(hours: int = Query(24, ge=1, le=720)):
+def _get_summary_data(hours: int, user_id: Optional[str] = None):
     """Get summary statistics from PostgreSQL and cache layers"""
     if not isinstance(hours, (int, float)):
         hours = getattr(hours, "default", 24)
@@ -95,7 +100,13 @@ async def get_summary(hours: int = Query(24, ge=1, le=720)):
         cur = conn.cursor()
         
         # 1. Total counts
-        cur.execute("""
+        user_filter = ""
+        params = [hours]
+        if user_id:
+            user_filter = " AND sr.user_id = %s::uuid"
+            params.append(user_id)
+
+        cur.execute(f"""
             SELECT 
                 COUNT(*) as total_scans,
                 SUM(CASE WHEN input_type = 'url' THEN 1 ELSE 0 END) as url_scans,
@@ -107,8 +118,8 @@ async def get_summary(hours: int = Query(24, ge=1, le=720)):
                 AVG(ap.inference_ms) as avg_time
             FROM scan_requests sr
             LEFT JOIN ai_predictions ap ON sr.id = ap.request_id
-            WHERE sr.created_at >= NOW() - INTERVAL '%s hours'
-        """, (hours,))
+            WHERE sr.created_at >= NOW() - (%s * INTERVAL '1 hour'){user_filter}
+        """, tuple(params))
         row = cur.fetchone()
         
         total = row[0] or 0
@@ -124,16 +135,17 @@ async def get_summary(hours: int = Query(24, ge=1, le=720)):
         offset_hours = int(round((local_now - utc_now).total_seconds() / 3600))
         
         # 2. Hourly activity (scan_activity) over past 24 hours
-        cur.execute("""
+        activity_params = (user_id,) if user_id else ()
+        cur.execute(f"""
             SELECT 
                 EXTRACT(HOUR FROM sr.created_at) as hr,
                 COUNT(*) as scans,
                 SUM(CASE WHEN ap.prediction_label = 'malicious' THEN 1 ELSE 0 END) as threats
             FROM scan_requests sr
             LEFT JOIN ai_predictions ap ON sr.id = ap.request_id
-            WHERE sr.created_at >= NOW() - INTERVAL '24 hours'
+            WHERE sr.created_at >= NOW() - INTERVAL '24 hours'{user_filter}
             GROUP BY EXTRACT(HOUR FROM sr.created_at)
-        """)
+        """, activity_params)
         activity_rows = cur.fetchall()
         
         # Shift database UTC hours to local hours
@@ -159,7 +171,7 @@ async def get_summary(hours: int = Query(24, ge=1, le=720)):
             })
             
         # 3. Threat Distribution (resolved dynamically and deterministically ordered)
-        cur.execute("""
+        cur.execute(f"""
             SELECT 
                 ap.threat_type,
                 sr.input_type,
@@ -223,14 +235,16 @@ async def get_summary(hours: int = Query(24, ge=1, le=720)):
         ]
             
         # 4. Recent Scans (latest 5)
-        cur.execute("""
+        recent_params = (user_id,) if user_id else ()
+        cur.execute(f"""
             SELECT sr.id, sr.input_type, sr.created_at,
                    ap.prediction_label, ap.threat_type, ap.confidence_score
             FROM scan_requests sr
             LEFT JOIN ai_predictions ap ON sr.id = ap.request_id
+            WHERE 1=1{user_filter}
             ORDER BY sr.created_at DESC
             LIMIT 5
-        """)
+        """, recent_params)
         recent_rows = cur.fetchall()
         recent_scans = []
         for r in recent_rows:
@@ -310,6 +324,21 @@ async def get_summary(hours: int = Query(24, ge=1, le=720)):
             "recent_scans": [],
             "timestamp": datetime.now().isoformat()
         }
+
+
+@router.get("/summary")
+async def get_summary(hours: int = Query(24, ge=1, le=720)):
+    """Get global summary statistics"""
+    return _get_summary_data(hours, user_id=None)
+
+@router.get("/summary/me")
+async def get_summary_me(
+    hours: int = Query(24, ge=1, le=720),
+    current_user: dict = Depends(get_current_user)
+):
+    """Get user-scoped summary statistics"""
+    user_id = current_user.get("id")
+    return _get_summary_data(hours, user_id=user_id)
 
 @router.get("/cache/status")
 async def get_cache_status():

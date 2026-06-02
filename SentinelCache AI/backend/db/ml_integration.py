@@ -171,18 +171,18 @@ class MLDatabaseIntegration:
             cur = conn.cursor()
             
             # Ensure users exist
-            cur.execute("SELECT id FROM users WHERE id = %s", (user_id,))
+            cur.execute("SELECT id FROM users WHERE id = %s::uuid", (user_id,))
             if not cur.fetchone():
                 cur.execute("""
                     INSERT INTO users (id, email, username, password_hash, role)
-                    VALUES (%s, %s, %s, %s, %s)
+                    VALUES (%s::uuid, %s, %s, %s, %s)
                     ON CONFLICT (id) DO NOTHING
                 """, (user_id, f"user_{user_id[:8]}@example.com", f"user_{user_id[:8]}", "placeholder", "user"))
             
             # Insert into scan_requests
             cur.execute("""
                 INSERT INTO scan_requests (id, user_id, input_type, input_value, input_hash, status, created_at)
-                VALUES (%s, %s, %s, %s, %s, 'complete', %s)
+                VALUES (%s::uuid, %s::uuid, %s, %s, %s, 'complete', %s)
                 ON CONFLICT (input_hash) DO UPDATE SET 
                     status = 'complete',
                     created_at = EXCLUDED.created_at
@@ -419,7 +419,7 @@ class MLDatabaseIntegration:
         try:
             cur.execute("""
                 INSERT INTO users (id, username, email, password_hash, role)
-                VALUES (%s, %s, %s, %s, 'user')
+                VALUES (%s::uuid, %s, %s, %s, 'user')
             """, (user_id, username, email, password_hash))
             conn.commit()
             return user_id
