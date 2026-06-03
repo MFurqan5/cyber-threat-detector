@@ -18,3 +18,20 @@ dist/
 # OS
 .DS_Store
 *.log
+
+# ML Model files (large binary files)
+*.pkl
+*.joblib
+*.h5
+*.model
+*.pickle
+*.sav
+
+# Specific model directories
+SentinelCache AI/ml_training/*.pkl
+SentinelCache AI/ml_training/*.joblib
+SentinelCache AI/ml_training/models/
+
+# Training outputs
+*.npy
+*.npz
