@@ -91,6 +91,19 @@ async def get_history(
             pass
         return {"total": 0, "scans": [], "error": str(e)}
 
+@router.get("/history/me")
+async def get_history_me(
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    scan_type: Optional[str] = Query(None, pattern="^(url|email|file|app)$"),
+    malicious_only: bool = False,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get scan history for the currently authenticated user"""
+    user_id = current_user.get("id")
+    return await get_history(limit=limit, offset=offset, scan_type=scan_type,
+                             malicious_only=malicious_only, user_id=user_id)
+
 def _get_summary_data(hours: int, user_id: Optional[str] = None):
     """Get summary statistics from PostgreSQL and cache layers"""
     if not isinstance(hours, (int, float)):
