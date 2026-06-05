@@ -30,6 +30,39 @@ def _extract_user_id(request: Request) -> Optional[str]:
             return str(uid)
     return None
 
+def _log_cache_hit(background_tasks, user_id, input_type, input_value, result, model_version, cache_time_ms):
+    """Save a scan record even when we hit the cache, so user history stays populated."""
+    if not ml_db or not hasattr(ml_db, 'save_prediction'):
+        return
+        
+    score = result.get("score", 0.5)
+    if score > 0.8:
+        severity, action = "critical", "blocked"
+    elif score > 0.6:
+        severity, action = "high", "blocked"
+    elif score > 0.4:
+        severity, action = "medium", "flagged"
+    else:
+        severity, action = "low", "none"
+        
+    prediction_data = {
+        "label": result.get("label", "safe"),
+        "threat_type": result.get("type", "unknown"),
+        "confidence": score,
+        "explanation": "Cached result from previous scan",
+        "indicators": result.get("indicators", [])
+    }
+    
+    req_id = str(uuid.uuid4())
+    try:
+        background_tasks.add_task(
+            ml_db.save_prediction,
+            req_id, user_id, input_type, input_value, prediction_data,
+            model_version, cache_time_ms, severity, action
+        )
+    except Exception as e:
+        logger.error(f"Failed to schedule cache hit save: {e}")
+
 
 class URLScanRequest(BaseModel):
     url: HttpUrl
@@ -210,6 +243,7 @@ async def scan_url(request: URLScanRequest, background_tasks: BackgroundTasks, r
         try:
             logger.info(f"Cache hit for URL: {url_str[:50]} from {cached['from_cache']}")
             result = cached["result"]
+            _log_cache_hit(background_tasks, user_id, "url", url_str, result, result.get("model", "cached"), cache_time_ms)
             return ScanResponse(
                 is_malicious=result.get("label") == "malicious",
                 confidence=result.get("score", 0.5),
@@ -364,6 +398,7 @@ async def scan_email(request: EmailScanRequest, background_tasks: BackgroundTask
         try:
             logger.info(f"Cache hit for email from {cached['from_cache']}")
             result = cached["result"]
+            _log_cache_hit(background_tasks, user_id, "email", email_preview, result, result.get("model", "cached"), cache_time_ms)
             return ScanResponse(
                 is_malicious=result.get("label") == "malicious",
                 confidence=result.get("score", 0.5),
@@ -491,6 +526,7 @@ async def scan_app(background_tasks: BackgroundTasks, raw_request: Request, file
         try:
             logger.info(f"Cache hit for file from {cached['from_cache']}")
             result = cached["result"]
+            _log_cache_hit(background_tasks, user_id, "file", file_hash, result, "cached", cache_time_ms)
             return {
                 "verdict": result.get("verdict") or result.get("label") or "safe",
                 "confidence_score": result.get("score") or 0.95,
@@ -590,6 +626,16 @@ async def search_app_safety(request: AppSearchRequest, background_tasks: Backgro
         try:
             logger.info(f"Cache hit for app from {cached['from_cache']}")
             result = cached["result"]
+            
+            # Format result to match what log_cache_hit expects
+            mock_result = {
+                "label": "safe" if result.get("safe") else "malicious",
+                "type": "clean" if result.get("safe") else "unsafe_app",
+                "score": 1.0 if result.get("safe") else 0.5,
+                "indicators": [] if result.get("safe") else ["not_in_verified_safe_list"]
+            }
+            _log_cache_hit(background_tasks, user_id, "app", app_query.lower(), mock_result, "cached", cache_time_ms)
+            
             return {
                 "found": result.get("found", False),
                 "safe": result.get("safe", False),

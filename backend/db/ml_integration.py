@@ -183,9 +183,6 @@ class MLDatabaseIntegration:
             cur.execute("""
                 INSERT INTO scan_requests (id, user_id, input_type, input_value, input_hash, status, created_at)
                 VALUES (%s::uuid, %s::uuid, %s, %s, %s, 'complete', %s)
-                ON CONFLICT (input_hash) DO UPDATE SET 
-                    status = 'complete',
-                    created_at = EXCLUDED.created_at
                 RETURNING id
             """, (request_id, user_id, input_type, input_value[:500], input_hash, datetime.utcnow()))
             
