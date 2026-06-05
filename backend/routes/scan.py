@@ -93,8 +93,10 @@ def extract_url_features(url: str) -> np.ndarray:
     return extract_url_features_single(url)
 
 def load_model(model_name: str):
-    """Load model from joblib file"""
-    model_path = Path(f"backend/models/{model_name}.pkl")
+    """Load model from joblib file using absolute path"""
+    import os
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    model_path = Path(os.path.join(base_dir, "models", f"{model_name}.pkl"))
     
     if model_path.exists():
         try:
@@ -416,27 +418,63 @@ async def scan_email(request: EmailScanRequest, background_tasks: BackgroundTask
             cached = None
     
     model = load_model("email_model")
+    text_lower = email_text.lower()
     
-    suspicious_keywords = ['verify', 'urgent', 'password', 'click', 'bank', 'account', 
-                          'confirm', 'security', 'update', 'alert', 'suspended', 
-                          'winner', 'prize', 'congratulations', 'immediately', 
-                          'unauthorized', 'login', 'verify your account']
+    # 1. High-risk keywords (Phishing, Malware, BEC)
+    critical_keywords = [
+        'verify', 'urgent', 'password', 'click', 'bank', 'account', 'confirm', 'security', 
+        'suspended', 'unauthorized', 'login', 'wire', 'routing', 'transfer', 'acquisition', 
+        'confidential', 'beneficiary', 'waived', 'overdue', 'invoice', '.exe', 'escalate', 
+        'frozen', 'breach'
+    ]
+    # 2. Medium-risk keywords (Spam)
+    spam_keywords = ['winner', 'prize', 'congratulations', 'immediately', 'free', 'gift']
     
-    score = sum(1 for kw in suspicious_keywords if kw in email_text.lower()) / len(suspicious_keywords)
-    prediction = 1 if score > 0.15 else 0
+    critical_matches = sum(1 for kw in critical_keywords if kw in text_lower)
+    spam_matches = sum(1 for kw in spam_keywords if kw in text_lower)
     
+    kw_score = (critical_matches * 0.15) + (spam_matches * 0.08)
+    kw_score = min(kw_score, 0.75) # Cap kw_score contribution to 75%
+    
+    # --- Check URLs inside Email ---
+    url_model = load_model("url_model")
+    urls_in_email = re.findall(r'(?:https?://[^\s<>"]+|www\.[^\s<>"]+)', email_text)
+    
+    max_url_risk = 0.0
+    if urls_in_email and url_model is not None:
+        try:
+            for extracted_url in urls_in_email:
+                url_feats = extract_url_features(extracted_url)
+                if hasattr(url_model, 'predict_proba'):
+                    url_prob = float(url_model.predict_proba(url_feats)[0][1])
+                    max_url_risk = max(max_url_risk, url_prob)
+                    logger.info(f"Email contained URL '{extracted_url}' with malicious prob={url_prob:.3f}")
+        except Exception as e:
+            logger.warning(f"Failed to evaluate URLs inside email: {e}")
+
+    model_score = 0
     if model is not None:
         try:
             if hasattr(model, 'predict_proba'):
                 model_prediction = model.predict([email_text])[0]
-                model_score = float(max(model.predict_proba([email_text])[0]))
-                score = (score + model_score) / 2
-                prediction = 1 if score > 0.2 else 0
-                logger.info(f"Model prediction: score={model_score:.3f}, final_score={score:.3f}")
+                model_score = float(model.predict_proba([email_text])[0][1])
+                logger.info(f"Model prediction score: {model_score:.3f}")
         except Exception as e:
-            logger.warning(f"Model prediction failed, using rule-based: {e}")
+            logger.warning(f"Model prediction failed: {e}")
+            
+    # If the email has a malicious URL, add heavy weight to the score
+    score = min(model_score * 0.5 + kw_score + (max_url_risk * 0.5), 0.99)
+    
+    if critical_matches >= 3 or max_url_risk >= 0.5:
+        score = max(score, 0.85)
+
+    prediction = 1 if score > 0.25 else 0
     
     threat_type, explanation, indicators = get_email_explanation(email_text, score)
+    if max_url_risk >= 0.5:
+        if "malicious_url_embedded" not in indicators:
+            indicators.append("malicious_url_embedded")
+        explanation += " ; Contains heavily malicious URL links"
     
     prediction_time = (time.time() - start_time) * 1000
     request_id = str(uuid.uuid4())
@@ -451,14 +489,20 @@ async def scan_email(request: EmailScanRequest, background_tasks: BackgroundTask
         "indicators": indicators
     }
     
-    if score > 0.3:
+    if score > 0.8:
+        severity = "critical"
+        action = "blocked"
+    elif score > 0.65:
         severity = "high"
-        action = "flagged"
-    elif score > 0.15:
+        action = "blocked"
+    elif score > 0.4:
         severity = "medium"
         action = "flagged"
-    else:
+    elif score > 0.15:
         severity = "low"
+        action = "flagged"
+    else:
+        severity = "none"
         action = "none"
     
     try:
@@ -806,3 +850,10 @@ async def scan_health():
         "seed_data_loaded": True if db_status.get("postgres") == "connected" else False,
         "note": "Running with fallback mode - Redis/PostgreSQL/MongoDB not required for basic functionality"
     }
+# Trigger reload
+
+# Trigger reload 2
+
+# Trigger reload 3
+
+# Trigger reload 4
