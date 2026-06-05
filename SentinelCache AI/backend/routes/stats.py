@@ -271,6 +271,23 @@ def _get_summary_data(hours: int, user_id: Optional[str] = None):
                 "confidence_score": r[5] if r[5] is not None else 0.0
             })
             
+        # Calculate personal cache hits before closing cursor
+        if user_id:
+            cur.execute("""
+                SELECT COUNT(*) FROM ai_predictions ap
+                JOIN scan_requests sr ON sr.id = ap.request_id
+                WHERE sr.user_id = %s::uuid AND ap.explanation = 'Cached result from previous scan'
+            """, (user_id,))
+            personal_cache_hits = cur.fetchone()[0] or 0
+        else:
+            cur.execute("""
+                SELECT COUNT(*) FROM ai_predictions 
+                WHERE explanation = 'Cached result from previous scan'
+            """)
+            personal_cache_hits = cur.fetchone()[0] or 0
+            
+        personal_cache_hit_rate = (personal_cache_hits / total * 100) if total > 0 else 0.0
+
         cur.close()
         
         # 5. Cache stats from ml_db
@@ -291,7 +308,7 @@ def _get_summary_data(hours: int, user_id: Optional[str] = None):
             cache_hit_rate = total_hits / total_cache_reqs if total_cache_reqs > 0 else 0.0
         except Exception as ce:
             logger.warning(f"Failed to calculate cache summary stats: {ce}")
-        
+            
         return {
             "period_hours": hours,
             "total_scans": total,
@@ -307,6 +324,8 @@ def _get_summary_data(hours: int, user_id: Optional[str] = None):
             "avg_confidence": round((row[6] or 0) * 100, 2),
             "avg_time_ms": round(row[7] or 0, 2),
             "cache_hit_rate": cache_hit_rate,
+            "personal_cache_hits": personal_cache_hits,
+            "personal_cache_hit_rate": round(personal_cache_hit_rate, 2),
             "cache": cache_stats,
             "scan_activity": scan_activity,
             "threat_distribution": threat_distribution,
@@ -327,6 +346,8 @@ def _get_summary_data(hours: int, user_id: Optional[str] = None):
             "safe_requests": 0,
             "avg_confidence": 0,
             "cache_hit_rate": 0.0,
+            "personal_cache_hits": 0,
+            "personal_cache_hit_rate": 0.0,
             "cache": {
                 "l1": {"hits": 0, "misses": 0, "hit_rate": 0},
                 "l2": {"hits": 0, "misses": 0, "hit_rate": 0},
