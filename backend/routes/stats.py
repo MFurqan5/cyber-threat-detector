@@ -6,6 +6,18 @@ from datetime import datetime, timedelta
 import json
 import logging
 
+def get_fresh_connection():
+    """Always get a fresh connection to avoid SSL timeout issues"""
+    try:
+        conn = ml_db.get_postgres_connection()
+        # Test if connection is alive
+        conn.cursor().execute("SELECT 1")
+        return conn
+    except Exception:
+        # Force reconnect
+        ml_db._postgres_conn = None  # reset cached connection
+        return ml_db.get_postgres_connection()
+
 # Setup logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -20,8 +32,9 @@ async def get_history(
     offset: int = Query(0, ge=0),
     scan_type: Optional[str] = Query(None, pattern="^(url|email|file|app)$"),
     malicious_only: bool = False,
-    user_id: Optional[str] = None
+    current_user: dict = Depends(get_current_user),  # ← ADD
 ):
+    user_id = current_user.get("id") 
     """Get scan history from PostgreSQL"""
     if not isinstance(limit, int):
         limit = getattr(limit, "default", 100)
@@ -90,6 +103,50 @@ async def get_history(
         except Exception:
             pass
         return {"total": 0, "scans": [], "error": str(e)}
+    
+# ── CHANGE 2: Add /history/me route — paste this AFTER the /history function ──
+
+@router.get("/history/me")
+async def get_my_history(
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    current_user: dict = Depends(get_current_user)
+):
+    """Get scan history for the currently authenticated user only"""
+    user_id = current_user.get("id")
+    try:
+        conn = ml_db.get_postgres_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT sr.id, sr.input_type, sr.input_value, sr.created_at,
+                   ap.prediction_label, ap.threat_type, ap.confidence_score
+            FROM scan_requests sr
+            LEFT JOIN ai_predictions ap ON sr.id = ap.request_id
+            WHERE sr.user_id = %s::uuid
+            ORDER BY sr.created_at DESC
+            LIMIT %s OFFSET %s
+        """, (user_id, limit, offset))
+        rows = cur.fetchall()
+        cur.close()
+
+        records = [{
+            "id": str(r[0]),
+            "input_type": r[1],
+            "input_value": r[2] or "",
+            "timestamp": r[3].isoformat() if r[3] else None,
+            "status": r[4] or "safe",
+            "threat_type": r[5] or "clean",
+            "confidence_score": r[6] or 0.0,
+        } for r in rows]
+
+        return {"total": len(records), "records": records}
+    except Exception as e:
+        logger.error(f"Error in get_my_history: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return {"total": 0, "records": [], "error": str(e)}
 
 def _get_summary_data(hours: int, user_id: Optional[str] = None):
     """Get summary statistics from PostgreSQL and cache layers"""
@@ -99,27 +156,39 @@ def _get_summary_data(hours: int, user_id: Optional[str] = None):
         conn = ml_db.get_postgres_connection()
         cur = conn.cursor()
         
-        # 1. Total counts
-        user_filter = ""
-        params = [hours]
+        # 1. Total counts - FIXED
         if user_id:
-            user_filter = " AND sr.user_id = %s::uuid"
-            params.append(user_id)
-
-        cur.execute(f"""
-            SELECT 
-                COUNT(*) as total_scans,
-                SUM(CASE WHEN input_type = 'url' THEN 1 ELSE 0 END) as url_scans,
-                SUM(CASE WHEN input_type = 'email' THEN 1 ELSE 0 END) as email_scans,
-                SUM(CASE WHEN input_type = 'file' THEN 1 ELSE 0 END) as file_scans,
-                SUM(CASE WHEN input_type = 'app' THEN 1 ELSE 0 END) as app_scans,
-                SUM(CASE WHEN ap.prediction_label = 'malicious' THEN 1 ELSE 0 END) as malicious_total,
-                AVG(ap.confidence_score) as avg_confidence,
-                AVG(ap.inference_ms) as avg_time
-            FROM scan_requests sr
-            LEFT JOIN ai_predictions ap ON sr.id = ap.request_id
-            WHERE sr.created_at >= NOW() - (%s * INTERVAL '1 hour'){user_filter}
-        """, tuple(params))
+            cur.execute("""
+                SELECT 
+                    COUNT(*) as total_scans,
+                    SUM(CASE WHEN input_type = 'url' THEN 1 ELSE 0 END) as url_scans,
+                    SUM(CASE WHEN input_type = 'email' THEN 1 ELSE 0 END) as email_scans,
+                    SUM(CASE WHEN input_type = 'file' THEN 1 ELSE 0 END) as file_scans,
+                    SUM(CASE WHEN input_type = 'app' THEN 1 ELSE 0 END) as app_scans,
+                    SUM(CASE WHEN ap.prediction_label = 'malicious' THEN 1 ELSE 0 END) as malicious_total,
+                    AVG(ap.confidence_score) as avg_confidence,
+                    AVG(ap.inference_ms) as avg_time
+                FROM scan_requests sr
+                LEFT JOIN ai_predictions ap ON sr.id = ap.request_id
+                WHERE sr.created_at >= NOW() - (%s * INTERVAL '1 hour')
+                AND sr.user_id = %s::uuid
+            """, (hours, user_id))
+        else:
+            cur.execute("""
+                SELECT 
+                    COUNT(*) as total_scans,
+                    SUM(CASE WHEN input_type = 'url' THEN 1 ELSE 0 END) as url_scans,
+                    SUM(CASE WHEN input_type = 'email' THEN 1 ELSE 0 END) as email_scans,
+                    SUM(CASE WHEN input_type = 'file' THEN 1 ELSE 0 END) as file_scans,
+                    SUM(CASE WHEN input_type = 'app' THEN 1 ELSE 0 END) as app_scans,
+                    SUM(CASE WHEN ap.prediction_label = 'malicious' THEN 1 ELSE 0 END) as malicious_total,
+                    AVG(ap.confidence_score) as avg_confidence,
+                    AVG(ap.inference_ms) as avg_time
+                FROM scan_requests sr
+                LEFT JOIN ai_predictions ap ON sr.id = ap.request_id
+                WHERE sr.created_at >= NOW() - (%s * INTERVAL '1 hour')
+            """, (hours,))
+        
         row = cur.fetchone()
         
         total = row[0] or 0
@@ -134,18 +203,30 @@ def _get_summary_data(hours: int, user_id: Optional[str] = None):
         utc_now = datetime.utcnow()
         offset_hours = int(round((local_now - utc_now).total_seconds() / 3600))
         
-        # 2. Hourly activity (scan_activity) over past 24 hours
-        activity_params = (user_id,) if user_id else ()
-        cur.execute(f"""
-            SELECT 
-                EXTRACT(HOUR FROM sr.created_at) as hr,
-                COUNT(*) as scans,
-                SUM(CASE WHEN ap.prediction_label = 'malicious' THEN 1 ELSE 0 END) as threats
-            FROM scan_requests sr
-            LEFT JOIN ai_predictions ap ON sr.id = ap.request_id
-            WHERE sr.created_at >= NOW() - INTERVAL '24 hours'{user_filter}
-            GROUP BY EXTRACT(HOUR FROM sr.created_at)
-        """, activity_params)
+        # 2. Hourly activity (scan_activity) over past 24 hours - FIXED
+        if user_id:
+            cur.execute("""
+                SELECT 
+                    EXTRACT(HOUR FROM sr.created_at) as hr,
+                    COUNT(*) as scans,
+                    SUM(CASE WHEN ap.prediction_label = 'malicious' THEN 1 ELSE 0 END) as threats
+                FROM scan_requests sr
+                LEFT JOIN ai_predictions ap ON sr.id = ap.request_id
+                WHERE sr.created_at >= NOW() - INTERVAL '24 hours'
+                AND sr.user_id = %s::uuid
+                GROUP BY EXTRACT(HOUR FROM sr.created_at)
+            """, (user_id,))
+        else:
+            cur.execute("""
+                SELECT 
+                    EXTRACT(HOUR FROM sr.created_at) as hr,
+                    COUNT(*) as scans,
+                    SUM(CASE WHEN ap.prediction_label = 'malicious' THEN 1 ELSE 0 END) as threats
+                FROM scan_requests sr
+                LEFT JOIN ai_predictions ap ON sr.id = ap.request_id
+                WHERE sr.created_at >= NOW() - INTERVAL '24 hours'
+                GROUP BY EXTRACT(HOUR FROM sr.created_at)
+            """)
         activity_rows = cur.fetchall()
         
         # Shift database UTC hours to local hours
@@ -170,16 +251,28 @@ def _get_summary_data(hours: int, user_id: Optional[str] = None):
                 "threats": bucket["threats"]
             })
             
-        # 3. Threat Distribution (resolved dynamically and deterministically ordered)
-        cur.execute(f"""
-            SELECT 
-                ap.threat_type,
-                sr.input_type,
-                COUNT(*) as count
-            FROM ai_predictions ap
-            LEFT JOIN scan_requests sr ON sr.id = ap.request_id
-            GROUP BY ap.threat_type, sr.input_type
-        """)
+        # 3. Threat Distribution - FIXED
+        if user_id:
+            cur.execute("""
+                SELECT 
+                    ap.threat_type,
+                    sr.input_type,
+                    COUNT(*) as count
+                FROM ai_predictions ap
+                LEFT JOIN scan_requests sr ON sr.id = ap.request_id
+                WHERE sr.user_id = %s::uuid
+                GROUP BY ap.threat_type, sr.input_type
+            """, (user_id,))
+        else:
+            cur.execute("""
+                SELECT 
+                    ap.threat_type,
+                    sr.input_type,
+                    COUNT(*) as count
+                FROM ai_predictions ap
+                LEFT JOIN scan_requests sr ON sr.id = ap.request_id
+                GROUP BY ap.threat_type, sr.input_type
+            """)
         threat_rows = cur.fetchall()
         total_predictions = sum(r[2] for r in threat_rows)
         
@@ -215,7 +308,6 @@ def _get_summary_data(hours: int, user_id: Optional[str] = None):
                 else:
                     disp_name = "Malware"
             else:
-                # Default fallback based on input type
                 if input_type == "url":
                     disp_name = "Phishing"
                 elif input_type == "email":
@@ -234,17 +326,26 @@ def _get_summary_data(hours: int, user_id: Optional[str] = None):
             {"name": "Clean", "value": round((distribution_counts["Clean"] / total_predictions) * 100, 1) if total_predictions > 0 else 0.0}
         ]
             
-        # 4. Recent Scans (latest 5)
-        recent_params = (user_id,) if user_id else ()
-        cur.execute(f"""
-            SELECT sr.id, sr.input_type, sr.created_at,
-                   ap.prediction_label, ap.threat_type, ap.confidence_score
-            FROM scan_requests sr
-            LEFT JOIN ai_predictions ap ON sr.id = ap.request_id
-            WHERE 1=1{user_filter}
-            ORDER BY sr.created_at DESC
-            LIMIT 5
-        """, recent_params)
+        # 4. Recent Scans (latest 5) - FIXED
+        if user_id:
+            cur.execute("""
+                SELECT sr.id, sr.input_type, sr.created_at,
+                       ap.prediction_label, ap.threat_type, ap.confidence_score
+                FROM scan_requests sr
+                LEFT JOIN ai_predictions ap ON sr.id = ap.request_id
+                WHERE sr.user_id = %s::uuid
+                ORDER BY sr.created_at DESC
+                LIMIT 5
+            """, (user_id,))
+        else:
+            cur.execute("""
+                SELECT sr.id, sr.input_type, sr.created_at,
+                       ap.prediction_label, ap.threat_type, ap.confidence_score
+                FROM scan_requests sr
+                LEFT JOIN ai_predictions ap ON sr.id = ap.request_id
+                ORDER BY sr.created_at DESC
+                LIMIT 5
+            """)
         recent_rows = cur.fetchall()
         recent_scans = []
         for r in recent_rows:
@@ -324,7 +425,6 @@ def _get_summary_data(hours: int, user_id: Optional[str] = None):
             "recent_scans": [],
             "timestamp": datetime.now().isoformat()
         }
-
 
 @router.get("/summary")
 async def get_summary(hours: int = Query(24, ge=1, le=720)):

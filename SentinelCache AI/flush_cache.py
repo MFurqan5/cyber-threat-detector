@@ -5,6 +5,8 @@ import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 try:
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    sys.path.append(project_root)
     from backend.db.ml_integration import ml_db
     print("Flushing Redis...")
     if hasattr(ml_db, 'get_redis_client'):
