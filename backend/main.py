@@ -28,22 +28,22 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Handle startup and shutdown events"""
     # Startup
-    logger.info("🚀 Starting SENTINELCACHE AI Backend...")
+    logger.info("🚀 Starting CYBERSENTINEL AI Backend...")
     
     # Ensure directories exist
     Path("backend/models").mkdir(parents=True, exist_ok=True)
     Path("backend/data").mkdir(parents=True, exist_ok=True)
     
-    logger.info("✅ SENTINELCACHE AI is ready!")
+    logger.info("✅ CYBERSENTINEL AI is ready!")
     
     yield
     
     # Shutdown
-    logger.info("🛑 Shutting down SENTINELCACHE AI...")
+    logger.info("🛑 Shutting down CYBERSENTINEL AI...")
 
 # Create FastAPI app
 app = FastAPI(
-    title="SENTINELCACHE AI - ML Security API",
+    title="CYBERSENTINEL AI - ML Security API",
     description="Advanced phishing detection API using Machine Learning",
     version="1.0.0",
     lifespan=lifespan,
@@ -104,7 +104,7 @@ app.include_router(auth.router)
 @app.get("/")
 async def root():
     return {
-        "name": "SENTINELCACHE AI",
+        "name": "CYBERSENTINEL AI",
         "version": "1.0.0",
         "status": "operational",
         "description": "ML-powered phishing detection API",
