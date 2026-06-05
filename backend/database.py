@@ -97,7 +97,7 @@ class Database:
                 )
             """)
 
-            # Users table
+            # Users table (SQLite fallback — PostgreSQL is primary)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,18 +107,13 @@ class Database:
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-
-            # Create index for faster user lookups
             cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_users_username 
-                ON users(username)
+                CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)
             """)
 
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_users_email 
-                ON users(email)
-            """)
-            
             conn.commit()
             logger.info("SQLite database initialized successfully at: %s", self.sqlite_path)
     
@@ -218,30 +213,28 @@ class Database:
             }
     
     def create_user(self, username: str, email: str, password_hash: str) -> str:
-        """Create a new user and return user id"""
+        """Create a new user — PostgreSQL primary, SQLite fallback"""
         if self.docker_available and self.ml_integration:
             try:
                 return self.ml_integration.create_user_postgres(username, email, password_hash)
             except Exception as e:
                 logger.error(f"PostgreSQL create_user failed, falling back to SQLite: {e}")
-                
         with self.get_sqlite_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO users (username, email, password_hash)
-                VALUES (?, ?, ?)
-            """, (username, email, password_hash))
+            cursor.execute(
+                "INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)",
+                (username, email, password_hash)
+            )
             conn.commit()
             return str(cursor.lastrowid)
 
     def get_user_by_username(self, username: str) -> Optional[dict]:
-        """Retrieve a user by username"""
+        """Retrieve a user by username — PostgreSQL primary, SQLite fallback"""
         if self.docker_available and self.ml_integration:
             try:
                 return self.ml_integration.get_user_by_username_postgres(username)
             except Exception as e:
                 logger.error(f"PostgreSQL get_user_by_username failed, falling back to SQLite: {e}")
-                
         with self.get_sqlite_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
@@ -249,13 +242,12 @@ class Database:
             return dict(row) if row else None
 
     def get_user_by_email(self, email: str) -> Optional[dict]:
-        """Retrieve a user by email"""
+        """Retrieve a user by email — PostgreSQL primary, SQLite fallback"""
         if self.docker_available and self.ml_integration:
             try:
                 return self.ml_integration.get_user_by_email_postgres(email)
             except Exception as e:
                 logger.error(f"PostgreSQL get_user_by_email failed, falling back to SQLite: {e}")
-                
         with self.get_sqlite_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
