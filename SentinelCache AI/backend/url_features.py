@@ -74,7 +74,7 @@ def extract_url_features_single(url: str) -> np.ndarray:
 
     # 8. Suspicious keywords
     suspicious = ['login', 'verify', 'account', 'secure', 'update', 'confirm',
-                   'signin', 'banking', 'paypal', 'amazon']
+                   'signin', 'banking', 'paypal', 'amazon', 'suspicious', 'free', 'prize', 'claim', 'urgent', 'wallet']
     features.append(sum(1 for kw in suspicious if kw in url_lower) / len(suspicious))
 
     # 9. Domain length
