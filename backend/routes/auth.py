@@ -216,7 +216,8 @@ async def login(login_data: UserLoginRequest):
         "user": {
             "id": user["id"],
             "username": user["username"],
-            "email": user["email"]
+            "email": user["email"],
+            "role": user.get("role", "user")
         }
     }
 
