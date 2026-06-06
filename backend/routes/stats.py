@@ -514,33 +514,63 @@ async def get_summary_me(
 
 @router.get("/cache/status")
 async def get_cache_status():
-    """Get REAL cache status with statistics — global system-wide (admin use)"""
+    """Get REAL cache status — computed from DB scan history (admin use)"""
     try:
-        # Get real cache stats from ml_db
-        stats = ml_db.get_cache_stats()
-        
+        conn = ml_db.get_postgres_connection()
+        cur = conn.cursor()
+
+        # Total scans
+        cur.execute("SELECT COUNT(*) FROM scan_requests")
+        total = cur.fetchone()[0] or 0
+
+        # Count cache hits per layer from explanation field
+        cur.execute("""
+            SELECT explanation, COUNT(*)
+            FROM ai_predictions
+            WHERE explanation LIKE 'Cached result from previous scan%%'
+            GROUP BY explanation
+        """)
+        rows = cur.fetchall()
+        cur.close()
+
+        l1_hits = l2_hits = l3_hits = legacy_hits = 0
+        for exp, cnt in rows:
+            if "(L1)" in exp:    l1_hits += cnt
+            elif "(L2)" in exp:  l2_hits += cnt
+            elif "(L3)" in exp:  l3_hits += cnt
+            else:                legacy_hits += cnt
+
+        l1_hits += legacy_hits  # unversioned legacy hits → L1
+
+        l2_total = max(0, total - l1_hits)
+        l3_total = max(0, total - l1_hits - l2_hits)
+
         return {
             "l1": {
-                "hit_rate": stats["l1"]["hit_rate"],
-                "hits": stats["l1"]["hits"],
-                "misses": stats["l1"]["misses"]
+                "hit_rate": round(l1_hits / total, 2) if total > 0 else 0.0,
+                "hits": l1_hits,
+                "misses": max(0, total - l1_hits),
             },
             "l2": {
-                "hit_rate": stats["l2"]["hit_rate"],
-                "hits": stats["l2"]["hits"],
-                "misses": stats["l2"]["misses"],
-                "keys": stats["l2"]["keys"]
+                "hit_rate": round(l2_hits / l2_total, 2) if l2_total > 0 else 0.0,
+                "hits": l2_hits,
+                "misses": max(0, l2_total - l2_hits),
+                "keys": l2_hits,
             },
             "l3": {
-                "hit_rate": stats["l3"]["hit_rate"],
-                "hits": stats["l3"]["hits"],
-                "misses": stats["l3"]["misses"],
-                "documents": stats["l3"]["documents"]
+                "hit_rate": round(l3_hits / l3_total, 2) if l3_total > 0 else 0.0,
+                "hits": l3_hits,
+                "misses": max(0, l3_total - l3_hits),
+                "documents": l3_hits,
             },
             "timestamp": datetime.now().isoformat()
         }
     except Exception as e:
         logger.error(f"Cache status error: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         return {
             "l1": {"hit_rate": 0, "hits": 0, "misses": 0},
             "l2": {"hit_rate": 0, "hits": 0, "misses": 0},

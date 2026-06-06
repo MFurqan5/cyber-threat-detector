@@ -275,7 +275,7 @@ async def scan_url(request: URLScanRequest, background_tasks: BackgroundTasks, r
     else:
         try:
             proba = model.predict_proba(features_array)[0]
-            score = float(proba[1])  # index 1 = malicious class probability
+            score = float(proba[1])
             prediction = 1 if score > 0.5 else 0
             logger.info(f"Model prediction: malicious_prob={score:.3f}, prediction={prediction}")
         except Exception as e:
@@ -335,31 +335,7 @@ async def scan_url(request: URLScanRequest, background_tasks: BackgroundTasks, r
         request_id=request_id,
         timestamp=datetime.now().isoformat()
     )
-    # Save to database (PostgreSQL, Redis) in background
-    try:
-        if ml_db and hasattr(ml_db, 'save_prediction'):
-            background_tasks.add_task(
-                ml_db.save_prediction,
-                request_id, user_id, "url", url_str, prediction_data,
-                "rf-url-v2.1-test", prediction_time, severity, action
-            )
-            logger.info(f"📝 Save task added for {request_id}")
-        else:
-            logger.error("❌ ml_db.save_prediction not available!")
-    except Exception as e:
-        logger.error(f"❌ Failed to schedule save: {e}")# Save to database (PostgreSQL, Redis) in background
-    try:
-        if ml_db and hasattr(ml_db, 'save_prediction'):
-            background_tasks.add_task(
-                ml_db.save_prediction,
-                request_id, user_id, "url", url_str, prediction_data,
-                "rf-url-v2.1-test", prediction_time, severity, action
-            )
-            logger.info(f"📝 Save task added for {request_id}")
-        else:
-            logger.error("❌ ml_db.save_prediction not available!")
-    except Exception as e:
-        logger.error(f"❌ Failed to schedule save: {e}")
+
 @router.post("/email", response_model=ScanResponse)
 async def scan_email(request: EmailScanRequest, background_tasks: BackgroundTasks, raw_request: Request):
     """Scan email content - integrates with existing database"""
@@ -420,23 +396,20 @@ async def scan_email(request: EmailScanRequest, background_tasks: BackgroundTask
     model = load_model("email_model")
     text_lower = email_text.lower()
     
-    # 1. High-risk keywords (Phishing, Malware, BEC)
     critical_keywords = [
         'verify', 'urgent', 'password', 'click', 'bank', 'account', 'confirm', 'security', 
         'suspended', 'unauthorized', 'login', 'wire', 'routing', 'transfer', 'acquisition', 
         'confidential', 'beneficiary', 'waived', 'overdue', 'invoice', '.exe', 'escalate', 
         'frozen', 'breach'
     ]
-    # 2. Medium-risk keywords (Spam)
     spam_keywords = ['winner', 'prize', 'congratulations', 'immediately', 'free', 'gift']
     
     critical_matches = sum(1 for kw in critical_keywords if kw in text_lower)
     spam_matches = sum(1 for kw in spam_keywords if kw in text_lower)
     
     kw_score = (critical_matches * 0.15) + (spam_matches * 0.08)
-    kw_score = min(kw_score, 0.75) # Cap kw_score contribution to 75%
+    kw_score = min(kw_score, 0.75)
     
-    # --- Check URLs inside Email ---
     url_model = load_model("url_model")
     urls_in_email = re.findall(r'(?:https?://[^\s<>"]+|www\.[^\s<>"]+)', email_text)
     
@@ -462,7 +435,6 @@ async def scan_email(request: EmailScanRequest, background_tasks: BackgroundTask
         except Exception as e:
             logger.warning(f"Model prediction failed: {e}")
             
-    # If the email has a malicious URL, add heavy weight to the score
     score = min(model_score * 0.5 + kw_score + (max_url_risk * 0.5), 0.99)
     
     if critical_matches >= 3 or max_url_risk >= 0.5:
@@ -549,6 +521,16 @@ async def scan_app(background_tasks: BackgroundTasks, raw_request: Request, file
     
     logger.info(f"Scanning file: {file_name} ({file_size} bytes), hash: {file_hash[:16]}...")
     
+    # ========== FIX: Determine input_type based on file extension ==========
+    file_ext = file_name.lower()
+    if file_ext.endswith(('.apk', '.xapk', '.apks', '.aab')):
+        input_type = 'app'
+    else:
+        input_type = 'file'
+    
+    logger.info(f"📁 File type detected: {input_type} for {file_name}")
+    # ========== END FIX ==========
+    
     # Determine user_id
     extracted_id = _extract_user_id(raw_request)
     if extracted_id:
@@ -556,12 +538,12 @@ async def scan_app(background_tasks: BackgroundTasks, raw_request: Request, file
     if not user_id:
         user_id = "22222222-2222-2222-2222-222222222222"
         
-    # Check cache first
+    # Check cache first - USE input_type here
     cached = None
     cache_start = time.time()
     try:
         if ml_db and hasattr(ml_db, 'check_cache'):
-            cached = ml_db.check_cache(file_hash, "file")
+            cached = ml_db.check_cache(file_hash, input_type)
     except Exception as e:
         logger.warning(f"Cache check failed for file: {e}")
     cache_time_ms = (time.time() - cache_start) * 1000
@@ -570,7 +552,7 @@ async def scan_app(background_tasks: BackgroundTasks, raw_request: Request, file
         try:
             logger.info(f"Cache hit for file from {cached['from_cache']}")
             result = cached["result"]
-            _log_cache_hit(background_tasks, user_id, "file", file_hash, result, "cached", cache_time_ms, cached["from_cache"])
+            _log_cache_hit(background_tasks, user_id, input_type, file_hash, result, "cached", cache_time_ms, cached["from_cache"])
             return {
                 "verdict": result.get("verdict") or result.get("label") or "safe",
                 "confidence_score": result.get("score") or 0.95,
@@ -587,7 +569,6 @@ async def scan_app(background_tasks: BackgroundTasks, raw_request: Request, file
             cached = None
             
     # Simple rule-based logic for file classification
-    # Flag executable/script files as malicious, others as safe
     is_malicious = file_name.lower().endswith(('.exe', '.apk', '.bat', '.cmd', '.scr', '.vbs', '.js', '.jar'))
     verdict = "malicious" if is_malicious else "safe"
     threat_type = "trojan" if is_malicious else "clean"
@@ -617,14 +598,17 @@ async def scan_app(background_tasks: BackgroundTasks, raw_request: Request, file
     severity = "high" if is_malicious else "low"
     action = "blocked" if is_malicious else "none"
     
-    # Save to databases in background
+    # Save to databases in background - USE input_type here!
     try:
         if ml_db and hasattr(ml_db, 'save_prediction'):
             background_tasks.add_task(
                 ml_db.save_prediction,
-                request_id, user_id, "file", file_hash, prediction_data,
+                request_id, user_id, input_type, file_hash, prediction_data,
                 "file-malware-v1.0", prediction_time, severity, action
             )
+            logger.info(f"✅ Saved {input_type} scan for {file_name}")
+        else:
+            logger.warning("ml_db or save_prediction not available, skipping save")
     except Exception as e:
         logger.error(f"Failed to schedule file scan save: {e}")
         
@@ -850,10 +834,3 @@ async def scan_health():
         "seed_data_loaded": True if db_status.get("postgres") == "connected" else False,
         "note": "Running with fallback mode - Redis/PostgreSQL/MongoDB not required for basic functionality"
     }
-# Trigger reload
-
-# Trigger reload 2
-
-# Trigger reload 3
-
-# Trigger reload 4
