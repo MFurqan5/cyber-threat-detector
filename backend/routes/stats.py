@@ -176,7 +176,7 @@ def _get_summary_data(hours: int, user_id: Optional[str] = None):
         conn = ml_db.get_postgres_connection()
         cur = conn.cursor()
         
-        # 1. Total counts - FIXED
+        # 1. Total counts — ALL-TIME (no time filter) so Dashboard & History always match
         if user_id:
             cur.execute("""
                 SELECT 
@@ -190,9 +190,8 @@ def _get_summary_data(hours: int, user_id: Optional[str] = None):
                     AVG(ap.inference_ms) as avg_time
                 FROM scan_requests sr
                 LEFT JOIN ai_predictions ap ON sr.id = ap.request_id
-                WHERE sr.created_at >= NOW() - (%s * INTERVAL '1 hour')
-                AND sr.user_id = %s::uuid
-            """, (hours, user_id))
+                WHERE sr.user_id = %s::uuid
+            """, (user_id,))
         else:
             cur.execute("""
                 SELECT 
@@ -206,8 +205,7 @@ def _get_summary_data(hours: int, user_id: Optional[str] = None):
                     AVG(ap.inference_ms) as avg_time
                 FROM scan_requests sr
                 LEFT JOIN ai_predictions ap ON sr.id = ap.request_id
-                WHERE sr.created_at >= NOW() - (%s * INTERVAL '1 hour')
-            """, (hours,))
+            """)
         
         row = cur.fetchone()
         
@@ -379,8 +377,7 @@ def _get_summary_data(hours: int, user_id: Optional[str] = None):
                 "confidence_score": r[5] if r[5] is not None else 0.0
             })
             
-        cur.close()
-        
+            
         # 5. Cache stats from ml_db
         cache_stats = {
             "l1": {"hits": 0, "misses": 0, "hit_rate": 0},
@@ -388,16 +385,19 @@ def _get_summary_data(hours: int, user_id: Optional[str] = None):
             "l3": {"hits": 0, "misses": 0, "hit_rate": 0}
         }
         cache_hit_rate = 0.0
+        total_hits = 0
         try:
+            cur.close()  # close the previous cursor
+            cur2 = conn.cursor()  # open a fresh one for cache stats
             if user_id:
                 # Calculate individual cache stats based on explanations
-                cur.execute("""
+                cur2.execute("""
                     SELECT ap.explanation, COUNT(*) FROM ai_predictions ap
                     JOIN scan_requests sr ON sr.id = ap.request_id
-                    WHERE sr.user_id = %s::uuid AND ap.explanation LIKE 'Cached result from previous scan%'
+                    WHERE sr.user_id = %s::uuid AND ap.explanation LIKE 'Cached result from previous scan%%'
                     GROUP BY ap.explanation
                 """, (user_id,))
-                user_cache_rows = cur.fetchall()
+                user_cache_rows = cur2.fetchall()
                 l1_hits = l2_hits = l3_hits = legacy_hits = 0
                 for exp, cnt in user_cache_rows:
                     if "(L1)" in exp: l1_hits += cnt
@@ -434,6 +434,7 @@ def _get_summary_data(hours: int, user_id: Optional[str] = None):
                     }
                 }
                 cache_hit_rate = round(total_hits / user_total, 2) if user_total > 0 else 0.0
+                logger.info(f"User {user_id} cache stats: l1_hits={l1_hits}, l2_hits={l2_hits}, l3_hits={l3_hits}, total={user_total}")
             else:
                 # Global stats
                 cache_stats = ml_db.get_cache_stats()
@@ -444,9 +445,10 @@ def _get_summary_data(hours: int, user_id: Optional[str] = None):
                 total_hits = l1.get("hits", 0) + l2.get("hits", 0) + l3.get("hits", 0)
                 total_cache_reqs = l1.get("hits", 0) + l1.get("misses", 0)
                 cache_hit_rate = total_hits / total_cache_reqs if total_cache_reqs > 0 else 0.0
+            cur2.close()
 
         except Exception as ce:
-            logger.warning(f"Failed to calculate cache summary stats: {ce}")
+            logger.warning(f"Failed to calculate cache summary stats: {ce}", exc_info=True)
         
         return {
             "period_hours": hours,
@@ -463,6 +465,8 @@ def _get_summary_data(hours: int, user_id: Optional[str] = None):
             "avg_confidence": round((row[6] or 0) * 100, 2),
             "avg_time_ms": round(row[7] or 0, 2),
             "cache_hit_rate": cache_hit_rate,
+            "personal_cache_hits": total_hits,
+            "personal_cache_hit_rate": round(cache_hit_rate * 100, 1),
             "cache": cache_stats,
             "scan_activity": scan_activity,
             "threat_distribution": threat_distribution,
@@ -495,13 +499,13 @@ def _get_summary_data(hours: int, user_id: Optional[str] = None):
         }
 
 @router.get("/summary")
-async def get_summary(hours: int = Query(24, ge=1, le=720)):
+async def get_summary(hours: int = Query(24, ge=1, le=8760)):
     """Get global summary statistics"""
     return _get_summary_data(hours, user_id=None)
 
 @router.get("/summary/me")
 async def get_summary_me(
-    hours: int = Query(24, ge=1, le=720),
+    hours: int = Query(24, ge=1, le=8760),
     current_user: dict = Depends(get_current_user)
 ):
     """Get user-scoped summary statistics"""
@@ -510,7 +514,7 @@ async def get_summary_me(
 
 @router.get("/cache/status")
 async def get_cache_status():
-    """Get REAL cache status with statistics"""
+    """Get REAL cache status with statistics — global system-wide (admin use)"""
     try:
         # Get real cache stats from ml_db
         stats = ml_db.get_cache_stats()
@@ -537,6 +541,77 @@ async def get_cache_status():
         }
     except Exception as e:
         logger.error(f"Cache status error: {e}")
+        return {
+            "l1": {"hit_rate": 0, "hits": 0, "misses": 0},
+            "l2": {"hit_rate": 0, "hits": 0, "misses": 0},
+            "l3": {"hit_rate": 0, "hits": 0, "misses": 0},
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e)
+        }
+
+@router.get("/cache/status/me")
+async def get_cache_status_me(
+    current_user: dict = Depends(get_current_user)
+):
+    """Get per-user cache stats computed from scan history"""
+    user_id = current_user.get("id")
+    try:
+        conn = ml_db.get_postgres_connection()
+        cur = conn.cursor()
+
+        # Get total scans for this user
+        cur.execute("""
+            SELECT COUNT(*) FROM scan_requests WHERE user_id = %s::uuid
+        """, (user_id,))
+        user_total = cur.fetchone()[0] or 0
+
+        # Count cache hits per layer from ai_predictions explanation field
+        cur.execute("""
+            SELECT ap.explanation, COUNT(*) FROM ai_predictions ap
+            JOIN scan_requests sr ON sr.id = ap.request_id
+            WHERE sr.user_id = %s::uuid AND ap.explanation LIKE 'Cached result from previous scan%%'
+            GROUP BY ap.explanation
+        """, (user_id,))
+        rows = cur.fetchall()
+        cur.close()
+
+        l1_hits = l2_hits = l3_hits = legacy_hits = 0
+        for exp, cnt in rows:
+            if "(L1)" in exp: l1_hits += cnt
+            elif "(L2)" in exp: l2_hits += cnt
+            elif "(L3)" in exp: l3_hits += cnt
+            else: legacy_hits += cnt
+
+        l1_hits += legacy_hits  # legacy unversioned hits count as L1
+
+        # Approximate misses based on cascading L1 -> L2 -> L3 logic
+        l2_total = max(0, user_total - l1_hits)
+        l3_total = max(0, user_total - l1_hits - l2_hits)
+
+        return {
+            "l1": {
+                "hit_rate": round(l1_hits / user_total, 2) if user_total > 0 else 0.0,
+                "hits": l1_hits,
+                "misses": max(0, user_total - l1_hits)
+            },
+            "l2": {
+                "hit_rate": round(l2_hits / l2_total, 2) if l2_total > 0 else 0.0,
+                "hits": l2_hits,
+                "misses": max(0, l2_total - l2_hits)
+            },
+            "l3": {
+                "hit_rate": round(l3_hits / l3_total, 2) if l3_total > 0 else 0.0,
+                "hits": l3_hits,
+                "misses": max(0, l3_total - l3_hits)
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"User cache status error: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         return {
             "l1": {"hit_rate": 0, "hits": 0, "misses": 0},
             "l2": {"hit_rate": 0, "hits": 0, "misses": 0},
