@@ -55,18 +55,31 @@ async def get_history(
             LEFT JOIN ai_predictions ap ON sr.id = ap.request_id
             WHERE 1=1
         """
+        
+        count_query = """
+            SELECT COUNT(*)
+            FROM scan_requests sr
+            LEFT JOIN ai_predictions ap ON sr.id = ap.request_id
+            WHERE 1=1
+        """
         params = []
         
         if scan_type:
             query += " AND sr.input_type = %s"
+            count_query += " AND sr.input_type = %s"
             params.append(scan_type)
         
         if malicious_only:
             query += " AND ap.prediction_label = 'malicious'"
+            count_query += " AND ap.prediction_label = 'malicious'"
             
         if user_id:
             query += " AND sr.user_id = %s::uuid"
+            count_query += " AND sr.user_id = %s::uuid"
             params.append(user_id)
+            
+        cur.execute(count_query, params)
+        total_count = cur.fetchone()[0]
         
         query += " ORDER BY sr.created_at DESC LIMIT %s OFFSET %s"
         params.extend([limit, offset])
@@ -91,7 +104,7 @@ async def get_history(
             })
         
         return {
-            "total": len(scans),
+            "total": total_count,
             "limit": limit,
             "offset": offset,
             "records": scans
@@ -118,6 +131,13 @@ async def get_my_history(
         conn = ml_db.get_postgres_connection()
         cur = conn.cursor()
         cur.execute("""
+            SELECT COUNT(*) 
+            FROM scan_requests 
+            WHERE user_id = %s::uuid
+        """, (user_id,))
+        total_count = cur.fetchone()[0]
+
+        cur.execute("""
             SELECT sr.id, sr.input_type, sr.input_value, sr.created_at,
                    ap.prediction_label, ap.threat_type, ap.confidence_score
             FROM scan_requests sr
@@ -139,7 +159,7 @@ async def get_my_history(
             "confidence_score": r[6] or 0.0,
         } for r in rows]
 
-        return {"total": len(records), "records": records}
+        return {"total": total_count, "limit": limit, "offset": offset, "records": records}
     except Exception as e:
         logger.error(f"Error in get_my_history: {e}")
         try:
@@ -369,14 +389,62 @@ def _get_summary_data(hours: int, user_id: Optional[str] = None):
         }
         cache_hit_rate = 0.0
         try:
-            cache_stats = ml_db.get_cache_stats()
-            l1 = cache_stats.get("l1", {"hits": 0, "misses": 0, "hit_rate": 0})
-            l2 = cache_stats.get("l2", {"hits": 0, "misses": 0, "hit_rate": 0})
-            l3 = cache_stats.get("l3", {"hits": 0, "misses": 0, "hit_rate": 0})
-            
-            total_hits = l1.get("hits", 0) + l2.get("hits", 0) + l3.get("hits", 0)
-            total_cache_reqs = l1.get("hits", 0) + l1.get("misses", 0)
-            cache_hit_rate = total_hits / total_cache_reqs if total_cache_reqs > 0 else 0.0
+            if user_id:
+                # Calculate individual cache stats based on explanations
+                cur.execute("""
+                    SELECT ap.explanation, COUNT(*) FROM ai_predictions ap
+                    JOIN scan_requests sr ON sr.id = ap.request_id
+                    WHERE sr.user_id = %s::uuid AND ap.explanation LIKE 'Cached result from previous scan%'
+                    GROUP BY ap.explanation
+                """, (user_id,))
+                user_cache_rows = cur.fetchall()
+                l1_hits = l2_hits = l3_hits = legacy_hits = 0
+                for exp, cnt in user_cache_rows:
+                    if "(L1)" in exp: l1_hits += cnt
+                    elif "(L2)" in exp: l2_hits += cnt
+                    elif "(L3)" in exp: l3_hits += cnt
+                    else: legacy_hits += cnt
+                
+                # Add legacy unversioned hits to L1
+                l1_hits += legacy_hits
+                
+                user_total = total
+                total_hits = l1_hits + l2_hits + l3_hits
+                
+                # Approximate misses based on sequential L1 -> L2 -> L3 logic
+                l1_total = user_total
+                l2_total = user_total - l1_hits
+                l3_total = user_total - l1_hits - l2_hits
+                
+                cache_stats = {
+                    "l1": {
+                        "hits": l1_hits,
+                        "misses": l1_total - l1_hits if l1_total > l1_hits else 0,
+                        "hit_rate": round(l1_hits / l1_total, 2) if l1_total > 0 else 0.0
+                    },
+                    "l2": {
+                        "hits": l2_hits,
+                        "misses": l2_total - l2_hits if l2_total > l2_hits else 0,
+                        "hit_rate": round(l2_hits / l2_total, 2) if l2_total > 0 else 0.0
+                    },
+                    "l3": {
+                        "hits": l3_hits,
+                        "misses": l3_total - l3_hits if l3_total > l3_hits else 0,
+                        "hit_rate": round(l3_hits / l3_total, 2) if l3_total > 0 else 0.0
+                    }
+                }
+                cache_hit_rate = round(total_hits / user_total, 2) if user_total > 0 else 0.0
+            else:
+                # Global stats
+                cache_stats = ml_db.get_cache_stats()
+                l1 = cache_stats.get("l1", {"hits": 0, "misses": 0, "hit_rate": 0})
+                l2 = cache_stats.get("l2", {"hits": 0, "misses": 0, "hit_rate": 0})
+                l3 = cache_stats.get("l3", {"hits": 0, "misses": 0, "hit_rate": 0})
+                
+                total_hits = l1.get("hits", 0) + l2.get("hits", 0) + l3.get("hits", 0)
+                total_cache_reqs = l1.get("hits", 0) + l1.get("misses", 0)
+                cache_hit_rate = total_hits / total_cache_reqs if total_cache_reqs > 0 else 0.0
+
         except Exception as ce:
             logger.warning(f"Failed to calculate cache summary stats: {ce}")
         
