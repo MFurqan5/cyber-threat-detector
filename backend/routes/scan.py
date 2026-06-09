@@ -573,7 +573,7 @@ async def scan_app(background_tasks: BackgroundTasks, raw_request: Request, file
             _log_cache_hit(background_tasks, user_id, "file", file_hash, result, "cached", cache_time_ms, cached["from_cache"])
             return {
                 "verdict": result.get("verdict") or result.get("label") or "safe",
-                "confidence_score": result.get("score") or 0.95,
+                "threat_level": result.get("score") or 0.95,
                 "threat_type": result.get("type") or "clean",
                 "file_name": result.get("file_name") or file_name,
                 "file_size": result.get("file_size") or file_size,
@@ -586,6 +586,9 @@ async def scan_app(background_tasks: BackgroundTasks, raw_request: Request, file
             logger.warning(f"Error processing cached file result: {e}")
             cached = None
             
+    # ── Determine scan type from file extension ──
+    input_type = 'app' if file_name and file_name.lower().endswith(('.apk', '.xapk', '.apks', '.aab')) else 'file'
+    
     # ── ML-based prediction for APK files, rule-based fallback for others ──
     if input_type == 'app':
         # Use the trained Drebin-215 app model for APK files
@@ -688,7 +691,7 @@ async def scan_app(background_tasks: BackgroundTasks, raw_request: Request, file
         
     return {
         "verdict": verdict,
-        "confidence_score": confidence,
+        "threat_level": confidence,
         "threat_type": threat_type,
         "file_name": file_name,
         "file_size": file_size,
