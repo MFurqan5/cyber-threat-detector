@@ -586,18 +586,75 @@ async def scan_app(background_tasks: BackgroundTasks, raw_request: Request, file
             logger.warning(f"Error processing cached file result: {e}")
             cached = None
             
-    # Simple rule-based logic for file classification
-    # Flag executable/script files as malicious, others as safe
-    is_malicious = file_name.lower().endswith(('.exe', '.apk', '.bat', '.cmd', '.scr', '.vbs', '.js', '.jar'))
-    verdict = "malicious" if is_malicious else "safe"
-    threat_type = "trojan" if is_malicious else "clean"
-    confidence = 0.93 if is_malicious else 0.98
-    indicators = ["suspicious_entropy", "packed_binary", "executable_file"] if is_malicious else []
-    summary = (
-        f"This file exhibits characteristics consistent with executable threat vectors. Checked via file-malware-v1.0 model."
-        if is_malicious else
-        "No malicious patterns detected. File appears to be safe based on binary signature analysis."
-    )
+    # ── ML-based prediction for APK files, rule-based fallback for others ──
+    if input_type == 'app':
+        # Use the trained Drebin-215 app model for APK files
+        app_model = load_model("app_model")
+        
+        if app_model is not None:
+            tmp_path = None
+            try:
+                from backend.app_features import extract_apk_features, get_risk_indicators
+                
+                # Write bytes to a temp file so the zip reader can process it
+                tmp_fd, tmp_path = tempfile.mkstemp(suffix='.apk')
+                os.write(tmp_fd, file_bytes)
+                os.close(tmp_fd)
+                
+                features = extract_apk_features(tmp_path)
+                
+                if hasattr(app_model, 'predict_proba'):
+                    proba = app_model.predict_proba(features)[0]
+                    malware_score = float(proba[1])
+                else:
+                    pred = int(app_model.predict(features)[0])
+                    malware_score = 0.95 if pred == 1 else 0.05
+                
+                is_malicious = malware_score > 0.5
+                verdict = "malicious" if is_malicious else "safe"
+                confidence = round(malware_score if is_malicious else 1 - malware_score, 4)
+                threat_type = "malware" if is_malicious else "clean"
+                indicators = get_risk_indicators(features)
+                summary = (
+                    f"APK analyzed using Drebin-215 ML model. Malware probability: {malware_score:.2%}. "
+                    f"Detected {int(features.sum())} suspicious features out of 215."
+                    if is_malicious else
+                    f"APK analyzed using Drebin-215 ML model. Malware probability: {malware_score:.2%}. "
+                    f"No significant malware indicators found."
+                )
+                logger.info(f"App model prediction: malware_prob={malware_score:.3f}, verdict={verdict}")
+                
+            except Exception as e:
+                logger.error(f"App model prediction failed, using fallback: {e}")
+                is_malicious = True
+                verdict = "malicious"
+                threat_type = "suspicious"
+                confidence = 0.5
+                indicators = ["analysis_error"]
+                summary = f"Could not fully analyze APK. Flagged as suspicious. Error: {str(e)[:100]}"
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+        else:
+            logger.warning("app_model.pkl not found, falling back to rule-based detection")
+            is_malicious = True
+            verdict = "malicious"
+            threat_type = "suspicious"
+            confidence = 0.6
+            indicators = ["model_unavailable", "executable_file"]
+            summary = "App model not available. APK flagged as suspicious by default."
+    else:
+        # Rule-based fallback for non-APK files (.exe, .bat, etc.)
+        is_malicious = file_name.lower().endswith(('.exe', '.bat', '.cmd', '.scr', '.vbs', '.js', '.jar'))
+        verdict = "malicious" if is_malicious else "safe"
+        threat_type = "trojan" if is_malicious else "clean"
+        confidence = 0.93 if is_malicious else 0.98
+        indicators = ["suspicious_entropy", "packed_binary", "executable_file"] if is_malicious else []
+        summary = (
+            f"This file exhibits characteristics consistent with executable threat vectors. Checked via file-malware-v1.0 model."
+            if is_malicious else
+            "No malicious patterns detected. File appears to be safe based on binary signature analysis."
+        )
     
     prediction_time = (time.time() - start_time) * 1000
     request_id = str(uuid.uuid4())
@@ -622,8 +679,9 @@ async def scan_app(background_tasks: BackgroundTasks, raw_request: Request, file
         if ml_db and hasattr(ml_db, 'save_prediction'):
             background_tasks.add_task(
                 ml_db.save_prediction,
-                request_id, user_id, "file", file_hash, prediction_data,
-                "file-malware-v1.0", prediction_time, severity, action
+                request_id, user_id, input_type, file_hash, prediction_data,
+                "drebin215-rf-v1.0" if input_type == 'app' else "file-malware-v1.0",
+                prediction_time, severity, action
             )
     except Exception as e:
         logger.error(f"Failed to schedule file scan save: {e}")
